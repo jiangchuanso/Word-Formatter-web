@@ -76,8 +76,8 @@ Word-Formatter-Pro 是一款面向公文、报告和常规 Word 文档的桌面�
 1.  **下载程序**：访问项目的 [Github Releases](https://github.com/cwyalpha/Word-Formatter-Pro/releases) 或 [Gitee Releases](https://gitee.com/cwyalpha/Word-Formatter-Pro/releases) 页面下载对应系统的成品程序。Windows 用户下载 `.exe`；Kylin/Linux 用户下载 `.AppImage`；macOS Apple Silicon 用户下载 `macOS-arm64.app.zip`。
 2.  **运行程序**：Windows 下双击 `.exe` 即可使用；macOS 下解压 `.zip` 后双击 `.app`，未签名首次运行如遇系统拦截，可在“系统设置 > 隐私与安全性”中允许打开；Kylin/Linux 下运行发布包中的 `.AppImage`。如果系统未自动赋予执行权限，可在程序目录执行：
     ```bash
-    chmod +x Word-Formatter-Pro.v2.7.6.Kylin-V10.x86_64.AppImage
-    ./Word-Formatter-Pro.v2.7.6.Kylin-V10.x86_64.AppImage
+    chmod +x Word-Formatter-Pro.v2.7.7.Kylin-V10.x86_64.AppImage
+    ./Word-Formatter-Pro.v2.7.7.Kylin-V10.x86_64.AppImage
     ```
 3.  **可选依赖**：`.docx/.txt/.md` 可直接处理。Windows 下如需完整处理 `.doc/.wps`、修订和自动编号转文本，请确保已安装 **Microsoft Office** 或 **WPS Office**；macOS/Kylin/Linux 下不会调用 WPS/Word，也不会执行自动编号转文本。如需在 macOS/Kylin/Linux 下处理 `.wps/.doc` 旧格式，请安装 LibreOffice：
     ```bash
@@ -123,18 +123,44 @@ Word-Formatter-Pro 是一款面向公文、报告和常规 Word 文档的桌面�
 项目提供 `packaging/build_release.py`，打包时会创建干净的构建 venv，避免把开发机全局环境中的无关依赖一起打进程序。PyInstaller 不支持跨系统交叉打包，请在目标系统上运行对应命令：
 
 ```bash
-# macOS Apple Silicon：生成 release/Word-Formatter-Pro.v2.7.6.macOS-arm64.app.zip
+# macOS Apple Silicon：生成 release/Word-Formatter-Pro.v2.7.7.macOS-arm64.app.zip
 python3 packaging/build_release.py macos --arch arm64
 
-# Windows：生成 release/Word-Formatter-Pro.v2.7.6.exe
+# Windows：生成 release/Word-Formatter-Pro.v2.7.7.exe
 python packaging/build_release.py windows
 
-# Kylin/Linux：生成 release/Word-Formatter-Pro.v2.7.6.Kylin-V10.x86_64.AppImage
-python packaging/build_release.py kylin --arch x86_64 --appimagetool /path/to/appimagetool
+# Kylin/Linux x86_64：准备 Tk、venv、pip 和 AppImage 构建工具
+uname -m  # 应输出 x86_64
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-pip python3-tk curl libfuse2
+mkdir -p packaging/tools
+curl -L -o packaging/tools/appimagetool-x86_64.AppImage \
+  https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+chmod +x packaging/tools/appimagetool-x86_64.AppImage
+
+# 生成 release/Word-Formatter-Pro.v2.7.7.Kylin-V10.x86_64.AppImage
+python3 packaging/build_release.py kylin --arch x86_64 \
+  --appimagetool "$PWD/packaging/tools/appimagetool-x86_64.AppImage"
+
+# 不封装 AppImage，只生成普通 Linux 可执行文件
+python3 packaging/build_release.py kylin --arch x86_64 --no-appimage
+
+# 也可在 x86_64 Docker 环境中通过 Miniforge/conda-forge 固定 Python 3.12
+# 构建 Kylin V10 SP1 版本
+docker build --platform linux/amd64 \
+  -t word-formatter-pro-kylin-builder:2.7.7 \
+  -f packaging/Dockerfile.kylin .
+docker run --rm --platform linux/amd64 \
+  -v "$PWD:/workspace" \
+  word-formatter-pro-kylin-builder:2.7.7 \
+  python packaging/build_release.py kylin --arch x86_64 --reuse-venv \
+  --appimagetool /usr/local/bin/appimagetool
 
 # 如需复用旧发布资产，可下载后重新生成校验文件
 python packaging/build_release.py reused-assets --overwrite
 ```
+
+Windows 构建脚本会按 `_tkinter` 的实际补丁版本选择配套 Tcl/Tk 数据，避免 Anaconda 环境中并存多套 Tcl/Tk 时生成无法启动的 EXE。
 
 打包 GUI 必须使用可 `import tkinter` 的 Python。macOS 上建议使用 Homebrew Python 并安装 Tk 支持：
 
@@ -234,6 +260,16 @@ A：不同文档的表格结构差异很大，自动调整可能改变原有表�
 A：不会。自动编号转文本依赖 WPS/Word COM，因此 macOS/Kylin/Linux 等非 Windows 环境固定跳过该步骤；即使安装 LibreOffice 用于转换 `.doc/.wps`，也不会把自动编号转换为普通文本。处理完成后请人工检查自动编号，尤其是无法单独选中的编号，其字体字号可能仍由编号样式控制。
 
 ## 版本更新记录
+
+### v2.7.7
+
+*   **新增行距单位选择**：题目、副标题、正文和表格行距支持磅值与 Word 倍数两种模式；倍数模式默认 1.0，并允许手动输入其他倍数。
+*   **新增段落缩进单位选择**：左右缩进支持厘米或字符，首行缩进继续使用 Word 字符缩进语义，默认 2 字符。
+*   **新增标题加粗选项**：支持对文章题目、一级标题和二级标题选择强制加粗。
+*   **重排配置界面**：配置项整合到单页可滚动区域，顺序调整为页面、文章标题、层级标题、正文、表格与图表、附件与增强；加载和保存配置按钮固定显示在配置区下方。
+*   **保持跨平台兼容**：继续使用 Tkinter/ttk，不引入额外 GUI 框架，兼顾 Windows、macOS 和 Kylin/Linux 的 DPI、系统字体及低分辨率环境。
+*   **完善 Kylin 打包命令**：补充 x86_64 环境依赖、`appimagetool` 下载、AppImage 构建、普通 Linux 可执行文件备用命令和 Kylin V10 SP1 Docker 构建镜像。
+*   **同步 doc-format Skill**：配置字段、格式化核心、CLI 配置说明、测试和文档与主程序保持一致。
 
 ### v2.7.6
 

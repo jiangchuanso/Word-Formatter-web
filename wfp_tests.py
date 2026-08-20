@@ -11,6 +11,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from wfp_config import DEFAULT_CONFIG
 from wfp_core import (
@@ -128,6 +129,79 @@ class OoxmlProtectionTests(unittest.TestCase):
         field_run = para_field.add_run()
         field_run._r.append(OxmlElement("w:fldChar"))
         self.assertTrue(WordProcessor._has_field_codes(para_field))
+
+
+class SpacingAndIndentUnitTests(unittest.TestCase):
+    def test_default_pt_line_spacing_writes_exact_twips(self):
+        doc = Document()
+        para = doc.add_paragraph("正文")
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+
+        processor._apply_line_spacing(
+            para,
+            'line_spacing',
+            'line_spacing_unit',
+            'line_spacing_multiple',
+            28,
+        )
+
+        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        self.assertEqual(spacing.get(qn('w:line')), '560')
+        self.assertEqual(spacing.get(qn('w:lineRule')), 'exact')
+
+    def test_multiple_line_spacing_writes_auto_240_units(self):
+        doc = Document()
+        para = doc.add_paragraph("正文")
+        config = DEFAULT_CONFIG.copy()
+        config.update({'line_spacing_unit': 'multiple', 'line_spacing_multiple': 1.5})
+        processor = WordProcessor(config)
+
+        processor._apply_line_spacing(
+            para,
+            'line_spacing',
+            'line_spacing_unit',
+            'line_spacing_multiple',
+            28,
+        )
+
+        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        self.assertEqual(spacing.get(qn('w:line')), '360')
+        self.assertEqual(spacing.get(qn('w:lineRule')), 'auto')
+
+    def test_default_indent_keeps_centimeter_fields_and_two_char_first_line(self):
+        doc = Document()
+        para = doc.add_paragraph("正文")
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+
+        processor._apply_text_indent_and_align(para)
+
+        ind = para._p.get_or_add_pPr().get_or_add_ind()
+        self.assertEqual(ind.get(qn('w:left')), '0')
+        self.assertEqual(ind.get(qn('w:right')), '0')
+        self.assertEqual(ind.get(qn('w:firstLineChars')), '200')
+        self.assertIsNone(ind.get(qn('w:leftChars')))
+        self.assertIsNone(ind.get(qn('w:rightChars')))
+
+    def test_character_indent_writes_character_fields(self):
+        doc = Document()
+        para = doc.add_paragraph("正文")
+        config = DEFAULT_CONFIG.copy()
+        config.update({
+            'paragraph_indent_unit': 'chars',
+            'left_indent_chars': 2,
+            'right_indent_chars': 1.5,
+            'first_line_indent_chars': 2,
+        })
+        processor = WordProcessor(config)
+
+        processor._apply_text_indent_and_align(para)
+
+        ind = para._p.get_or_add_pPr().get_or_add_ind()
+        self.assertEqual(ind.get(qn('w:leftChars')), '200')
+        self.assertEqual(ind.get(qn('w:rightChars')), '150')
+        self.assertEqual(ind.get(qn('w:firstLineChars')), '200')
+        self.assertIsNone(ind.get(qn('w:left')))
+        self.assertIsNone(ind.get(qn('w:right')))
 
     def test_strip_leading_whitespace_removes_plain_blank_run(self):
         doc = Document()

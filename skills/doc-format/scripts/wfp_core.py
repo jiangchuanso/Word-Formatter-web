@@ -1083,23 +1083,34 @@ class WordProcessor:
 
     def _apply_text_indent_and_align(self, para):
         pf = para.paragraph_format
-        # 清除 python-docx 层面的缩进
+        indent_unit = self._normalize_indent_unit(self.config.get('paragraph_indent_unit', 'cm'))
         pf.first_line_indent = None
-        pf.left_indent = Cm(self.config['left_indent_cm'])
-        pf.right_indent = Cm(self.config['right_indent_cm'])
-        
-        # 操作底层 XML，彻底清理残留的缩进属性，避免与首行缩进叠加
+        pf.left_indent = None
+        pf.right_indent = None
+
         ind = para._p.get_or_add_pPr().get_or_add_ind()
-        # 清除可能残留的字符单位左缩进（防止与首行缩进叠加显示为4字符）
+        ind.attrib.pop(qn('w:left'), None)
+        ind.attrib.pop(qn('w:right'), None)
         ind.attrib.pop(qn('w:leftChars'), None)
-        # 清除可能残留的悬挂缩进
+        ind.attrib.pop(qn('w:rightChars'), None)
         ind.attrib.pop(qn('w:hanging'), None)
         ind.attrib.pop(qn('w:hangingChars'), None)
-        # 清除可能残留的固定值首行缩进（我们使用字符单位 firstLineChars）
         ind.attrib.pop(qn('w:firstLine'), None)
-        # 设置首行缩进 2 字符（200 = 2 × 100）
-        ind.set(qn("w:firstLineChars"), "200")
-        
+        ind.attrib.pop(qn('w:firstLineChars'), None)
+
+        if indent_unit == 'chars':
+            left_chars = self._config_float(self.config, 'left_indent_chars', 0.0)
+            right_chars = self._config_float(self.config, 'right_indent_chars', 0.0)
+            ind.set(qn('w:leftChars'), self._chars_to_word_value(left_chars))
+            ind.set(qn('w:rightChars'), self._chars_to_word_value(right_chars))
+        else:
+            pf.left_indent = Cm(self._config_float(self.config, 'left_indent_cm', 0.0))
+            pf.right_indent = Cm(self._config_float(self.config, 'right_indent_cm', 0.0))
+
+        first_line_chars = self._config_float(self.config, 'first_line_indent_chars', 2.0)
+        if first_line_chars > 0:
+            ind.set(qn("w:firstLineChars"), self._chars_to_word_value(first_line_chars))
+
         para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     def _iter_block_items(self, parent):
@@ -1287,6 +1298,61 @@ class WordProcessor:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _normalize_spacing_unit(value):
+        value = str(value or 'pt').strip().lower()
+        if value in ('multiple', '倍数', 'multi'):
+            return 'multiple'
+        return 'pt'
+
+    @staticmethod
+    def _normalize_indent_unit(value):
+        value = str(value or 'cm').strip().lower()
+        if value in ('chars', 'char', 'character', 'characters', '字符'):
+            return 'chars'
+        return 'cm'
+
+    @staticmethod
+    def _chars_to_word_value(value):
+        return str(int(round(max(0.0, float(value)) * 100)))
+
+    def _apply_line_spacing(self, para, pt_key, unit_key, multiple_key, default_pt, default_multiple=1.0):
+        unit = self._normalize_spacing_unit(self.config.get(unit_key, 'pt'))
+        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        if unit == 'multiple':
+            multiple = self._config_float(self.config, multiple_key, default_multiple)
+            if multiple <= 0:
+                multiple = default_multiple
+            spacing.set(qn('w:line'), str(int(round(multiple * 240))))
+            spacing.set(qn('w:lineRule'), 'auto')
+            return
+
+        line_spacing_pt = self._config_float(self.config, pt_key, default_pt)
+        if line_spacing_pt <= 0:
+            para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+            spacing.attrib.pop(qn('w:line'), None)
+            return
+        spacing.set(qn('w:line'), str(int(round(line_spacing_pt * 20))))
+        spacing.set(qn('w:lineRule'), 'exact')
+
+    @staticmethod
+    def _apply_bold_to_runs(para, enabled):
+        if not enabled:
+            return
+        for run in para.runs:
+            run.font.bold = True
+
+    @staticmethod
+    def _apply_bold_to_first_chars(para, char_count, enabled):
+        if not enabled:
+            return
+        consumed = 0
+        for run in para.runs:
+            run_len = len(run.text or '')
+            if run_len and consumed < char_count:
+                run.font.bold = True
+            consumed += run_len
+
     def _format_tables(self, doc, apply_color=True):
         if not self.config.get('enable_table_formatting', False):
             self._log("表格自动调整未启用，跳过表格内容格式化。")
@@ -1300,7 +1366,6 @@ class WordProcessor:
         table_font = self.config.get('table_font', self.config.get('body_font', '仿宋_GB2312'))
         table_header_font = self.config.get('table_header_font', table_font)
         table_size = self._config_float(self.config, 'table_size', self.config.get('body_size', 12))
-        table_line_spacing = self._config_float(self.config, 'table_line_spacing', 22)
         row_height_cm = self._config_float(self.config, 'table_row_height_cm', 0.7)
         border_size_pt = self._config_float(self.config, 'table_border_size_pt', 0.5)
         width_percent = self._config_float(self.config, 'table_width_percent', 100)
@@ -1353,11 +1418,13 @@ class WordProcessor:
                         para.paragraph_format.first_line_indent = Pt(0)
                         para.paragraph_format.space_before = Pt(0)
                         para.paragraph_format.space_after = Pt(0)
-                        if table_line_spacing > 0:
-                            para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-                            para.paragraph_format.line_spacing = Pt(table_line_spacing)
-                        else:
-                            para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+                        self._apply_line_spacing(
+                            para,
+                            'table_line_spacing',
+                            'table_line_spacing_unit',
+                            'table_line_spacing_multiple',
+                            22,
+                        )
 
                         if smart_align:
                             if row_idx == 0:
@@ -1586,6 +1653,7 @@ class WordProcessor:
                 self._log(f"段落 {idx + 1}: 主标题行 - \"{para.text[:30]}...\"")
                 self._strip_leading_whitespace(para)
                 self._apply_font_to_runs(para, self.config['title_font'], self.config['title_size'], set_color=apply_color)
+                self._apply_bold_to_runs(para, self.config.get('title_bold', False))
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 para.paragraph_format.first_line_indent = None
                 
@@ -1595,7 +1663,13 @@ class WordProcessor:
                 spacing.set(qn('w:afterAutospacing'), '0')
                 para.paragraph_format.space_before = Pt(0)
                 para.paragraph_format.space_after = Pt(0)
-                para.paragraph_format.line_spacing = Pt(self.config['title_line_spacing'])
+                self._apply_line_spacing(
+                    para,
+                    'title_line_spacing',
+                    'title_line_spacing_unit',
+                    'title_line_spacing_multiple',
+                    33,
+                )
                 
                 self._reset_pagination_properties(para)
         
@@ -1616,7 +1690,13 @@ class WordProcessor:
                 spacing.set(qn('w:afterAutospacing'), '0')
                 para.paragraph_format.space_before = Pt(0)
                 para.paragraph_format.space_after = Pt(0)
-                para.paragraph_format.line_spacing = Pt(self.config['subtitle_line_spacing'])
+                self._apply_line_spacing(
+                    para,
+                    'subtitle_line_spacing',
+                    'subtitle_line_spacing_unit',
+                    'subtitle_line_spacing_multiple',
+                    33,
+                )
                 
                 self._reset_pagination_properties(para)
 
@@ -1650,9 +1730,11 @@ class WordProcessor:
                 if RE_HEADING_H1.match(text_to_check):
                     self._log(f"  > 文字识别为一级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['h1_font'], self.config['h1_size'], set_color=apply_color)
+                    self._apply_bold_to_runs(para, self.config.get('h1_bold', False))
                 elif RE_HEADING_H2.match(text_to_check):
                     self._log(f"  > 文字识别为二级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
+                    self._apply_bold_to_runs(para, self.config.get('h2_bold', False))
                 elif RE_HEADING_H3.match(text_to_check):
                     self._log(f"  > 文字识别为三级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
@@ -1674,7 +1756,13 @@ class WordProcessor:
             spacing = para._p.get_or_add_pPr().get_or_add_spacing()
             spacing.set(qn('w:beforeAutospacing'), '0'); spacing.set(qn('w:afterAutospacing'), '0')
             para.paragraph_format.space_before, para.paragraph_format.space_after = Pt(0), Pt(0)
-            para.paragraph_format.line_spacing = Pt(self.config['line_spacing'])
+            self._apply_line_spacing(
+                para,
+                'line_spacing',
+                'line_spacing_unit',
+                'line_spacing_multiple',
+                28,
+            )
 
             is_attachment_enabled = self.config.get('enable_attachment_formatting', False)
             is_attachment_candidate = False
@@ -1718,6 +1806,7 @@ class WordProcessor:
                         self._log(f"    段落 {idx + 1}: 附件标题行 - \"{para_title.text.strip()[:30]}...\"")
                         self._strip_leading_whitespace(para_title)
                         self._apply_font_to_runs(para_title, self.config['title_font'], self.config['title_size'], set_color=apply_color)
+                        self._apply_bold_to_runs(para_title, self.config.get('title_bold', False))
                         para_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         para_title.paragraph_format.first_line_indent = None
                         
@@ -1727,7 +1816,13 @@ class WordProcessor:
                         spacing.set(qn('w:afterAutospacing'), '0')
                         para_title.paragraph_format.space_before = Pt(0)
                         para_title.paragraph_format.space_after = Pt(0)
-                        para_title.paragraph_format.line_spacing = Pt(self.config['title_line_spacing'])
+                        self._apply_line_spacing(
+                            para_title,
+                            'title_line_spacing',
+                            'title_line_spacing_unit',
+                            'title_line_spacing_multiple',
+                            33,
+                        )
                         
                         self._reset_pagination_properties(para_title)
                         self._format_heading(para_title, 1)
@@ -1749,7 +1844,13 @@ class WordProcessor:
                         spacing.set(qn('w:afterAutospacing'), '0')
                         para_subtitle.paragraph_format.space_before = Pt(0)
                         para_subtitle.paragraph_format.space_after = Pt(0)
-                        para_subtitle.paragraph_format.line_spacing = Pt(self.config['subtitle_line_spacing'])
+                        self._apply_line_spacing(
+                            para_subtitle,
+                            'subtitle_line_spacing',
+                            'subtitle_line_spacing_unit',
+                            'subtitle_line_spacing_multiple',
+                            33,
+                        )
                         
                         self._reset_pagination_properties(para_subtitle)
                 
@@ -1769,6 +1870,7 @@ class WordProcessor:
                 self._strip_leading_whitespace(para)
                 self._format_heading(para, 1)
                 self._apply_font_to_runs(para, self.config['h1_font'], self.config['h1_size'], set_color=apply_color)
+                self._apply_bold_to_runs(para, self.config.get('h1_bold', False))
                 self._apply_text_indent_and_align(para)
                 self._reset_pagination_properties(para)
 
@@ -1817,17 +1919,18 @@ class WordProcessor:
                             if body_part:
                                 body_run = para.add_run(body_part)
                                 self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-                        
+
                         runs_to_format = [r for r in [title_run, body_run] if r] or ([new_run] if new_run else [])
                         for r in runs_to_format:
                             if r:
                                 r.bold = run_info['bold']; r.italic = run_info['italic']
                                 r.underline = run_info['underline']
                                 if run_info['font_color']: r.font.color.rgb = run_info['font_color']
-                        
+
                         char_count = run_end_pos
-                    
+
                     self._format_heading(para, 2)
+                    self._apply_bold_to_first_chars(para, title_len, self.config.get('h2_bold', False))
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
 
@@ -1838,6 +1941,7 @@ class WordProcessor:
                         for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
                     self._format_heading(para, 2)
                     self._apply_font_to_runs(para, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
+                    self._apply_bold_to_runs(para, self.config.get('h2_bold', False))
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
                     

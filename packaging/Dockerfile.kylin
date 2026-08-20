@@ -1,0 +1,29 @@
+FROM macrosan/kylin:v10-sp1
+
+ARG MINIFORGE_URL=https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+ARG PYTHON_VERSION=3.12
+
+RUN dnf install -y binutils ca-certificates curl \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN curl -fsSL "${MINIFORGE_URL}" -o /tmp/miniforge.sh \
+    && bash /tmp/miniforge.sh -b -p /opt/conda \
+    && rm -f /tmp/miniforge.sh
+
+RUN /opt/conda/bin/conda create -y -p /opt/wfp-build \
+      python="${PYTHON_VERSION}" pip tk \
+    && /opt/conda/bin/conda clean -afy
+
+RUN curl -fsSL "${APPIMAGETOOL_URL}" -o /usr/local/bin/appimagetool \
+    && chmod +x /usr/local/bin/appimagetool
+
+ENV PATH=/opt/wfp-build/bin:/opt/conda/bin:${PATH}
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+
+RUN python --version \
+    && python -c "import tkinter; print('Tk', tkinter.TkVersion)" \
+    && objdump --version | head -n 1
+
+WORKDIR /workspace

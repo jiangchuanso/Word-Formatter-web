@@ -9,6 +9,76 @@ import sys
 import tempfile
 import threading
 
+
+def _configure_tcl_tk_paths():
+    if getattr(sys, 'frozen', False):
+        return
+    prefix = getattr(sys, 'prefix', '')
+    dll_dir = os.path.join(prefix, 'Library', 'bin')
+    if os.path.isdir(dll_dir) and hasattr(os, 'add_dll_directory'):
+        try:
+            os.add_dll_directory(dll_dir)
+        except OSError:
+            pass
+    preferred_libraries = None
+    if os.name == 'nt':
+        try:
+            import ctypes
+
+            library_tcl_dll = os.path.join(prefix, 'Library', 'bin', 'tcl86t.dll')
+            library_tk_dll = os.path.join(prefix, 'Library', 'bin', 'tk86t.dll')
+            dlls_tcl_dll = os.path.join(prefix, 'DLLs', 'tcl86t.dll')
+            dlls_tk_dll = os.path.join(prefix, 'DLLs', 'tk86t.dll')
+            if os.path.exists(library_tcl_dll):
+                tcl_dll = ctypes.CDLL(library_tcl_dll)
+                if os.path.exists(library_tk_dll):
+                    ctypes.CDLL(library_tk_dll)
+                preferred_libraries = (
+                    os.path.join(prefix, 'Library', 'lib', 'tcl8.6'),
+                    os.path.join(prefix, 'Library', 'lib', 'tk8.6'),
+                )
+            elif os.path.exists(dlls_tcl_dll):
+                tcl_dll = ctypes.CDLL(dlls_tcl_dll)
+                if os.path.exists(dlls_tk_dll):
+                    ctypes.CDLL(dlls_tk_dll)
+                preferred_libraries = (
+                    os.path.join(prefix, 'tcl', 'tcl8.6'),
+                    os.path.join(prefix, 'tcl', 'tk8.6'),
+                )
+            else:
+                tcl_dll = None
+            if tcl_dll is not None:
+                tcl_dll.Tcl_FindExecutable.argtypes = [ctypes.c_char_p]
+                executable = sys.executable.replace('\\', '/').encode('utf-8')
+                tcl_dll.Tcl_FindExecutable(executable)
+        except Exception:
+            preferred_libraries = None
+    library_candidates = []
+    if preferred_libraries:
+        library_candidates.append(preferred_libraries)
+    library_candidates.extend([
+        (
+            os.path.join(prefix, 'Library', 'lib', 'tcl8.6'),
+            os.path.join(prefix, 'Library', 'lib', 'tk8.6'),
+        ),
+        (
+            os.path.join(prefix, 'tcl', 'tcl8.6'),
+            os.path.join(prefix, 'tcl', 'tk8.6'),
+        ),
+        (
+            os.path.join(prefix, 'Lib', 'tcl8.6'),
+            os.path.join(prefix, 'Lib', 'tk8.6'),
+        ),
+    ])
+    for tcl_library, tk_library in library_candidates:
+        if os.path.exists(os.path.join(tcl_library, 'init.tcl')) and os.path.exists(os.path.join(tk_library, 'tk.tcl')):
+            os.environ.setdefault('TCL_LIBRARY', tcl_library)
+            os.environ.setdefault('TK_LIBRARY', tk_library)
+            break
+
+
+_configure_tcl_tk_paths()
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, Menu, font as tkfont
 try:
@@ -34,6 +104,25 @@ from wfp_core import (
     _uninitialize_com_for_thread,
 )
 from wfp_version import APP_TITLE, __version__
+
+UNIT_DISPLAY_TO_CONFIG = {
+    '磅值': 'pt',
+    '倍数': 'multiple',
+    '厘米': 'cm',
+    '字符': 'chars',
+}
+UNIT_CONFIG_TO_DISPLAY = {
+    'pt': '磅值',
+    'multiple': '倍数',
+    'cm': '厘米',
+    'chars': '字符',
+}
+UNIT_VALUE_SUFFIX = {
+    'pt': '磅',
+    'multiple': '倍',
+    'cm': '厘米',
+    'chars': '字符',
+}
 
 class WordFormatterGUI:
     def __init__(self, master):
@@ -66,11 +155,17 @@ class WordFormatterGUI:
         self.table_header_bold_var = tk.BooleanVar(value=self.default_params['table_header_bold'])
         self.table_smart_align_var = tk.BooleanVar(value=self.default_params['table_smart_align'])
         self.table_unified_borders_var = tk.BooleanVar(value=self.default_params['table_unified_borders'])
+        self.title_bold_var = tk.BooleanVar(value=self.default_params.get('title_bold', False))
+        self.h1_bold_var = tk.BooleanVar(value=self.default_params.get('h1_bold', False))
+        self.h2_bold_var = tk.BooleanVar(value=self.default_params.get('h2_bold', False))
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_text_var = tk.StringVar(value="")
         self.entries = {}
         self.attachment_option_widgets = []
         self.table_option_widgets = []
+        self.spacing_controls = []
+        self.indent_controls = []
+        self._active_config_canvas = None
         
         self.default_config_path = "default_config.json"
         
@@ -174,6 +269,37 @@ class WordFormatterGUI:
     def _update_table_state(self):
         self._set_widgets_enabled(self.table_option_widgets, self.enable_table_var.get())
 
+    def _config_unit_value(self, widget, default):
+        value = widget.get().strip()
+        return UNIT_DISPLAY_TO_CONFIG.get(value, value or default)
+
+    def _refresh_spacing_controls(self):
+        for control in self.spacing_controls:
+            unit = self._config_unit_value(control['unit'], 'pt')
+            show_multiple = unit == 'multiple'
+            control['suffix'].configure(
+                text=UNIT_VALUE_SUFFIX.get(unit, UNIT_VALUE_SUFFIX['pt'])
+            )
+            if show_multiple:
+                if not control['multiple'].get().strip():
+                    control['multiple'].insert(0, '1.0')
+                control['pt'].grid_remove()
+                control['multiple'].grid()
+            else:
+                control['multiple'].grid_remove()
+                control['pt'].grid()
+
+    def _refresh_indent_controls(self):
+        for control in self.indent_controls:
+            unit = self._config_unit_value(control['unit'], 'cm')
+            show_chars = unit == 'chars'
+            for label in control['suffix_labels']:
+                label.configure(text=UNIT_VALUE_SUFFIX.get(unit, UNIT_VALUE_SUFFIX['cm']))
+            for widget in control['cm_widgets']:
+                widget.grid_remove() if show_chars else widget.grid()
+            for widget in control['char_widgets']:
+                widget.grid() if show_chars else widget.grid_remove()
+
     def _enable_dependent_widgets_for_config_load(self):
         self._set_widgets_enabled(self.attachment_option_widgets, True)
         self._set_widgets_enabled(self.table_option_widgets, True)
@@ -195,9 +321,10 @@ class WordFormatterGUI:
                 display_val = self.font_size_map_rev.get(value, str(value))
                 widget.set(display_val)
             elif isinstance(widget, ttk.Combobox):
-                widget.set(value)
-                if value != self.font_separator:
-                    widget._last_valid_value = value
+                display_val = UNIT_CONFIG_TO_DISPLAY.get(str(value).strip(), value)
+                widget.set(display_val)
+                if display_val != self.font_separator:
+                    widget._last_valid_value = display_val
             else:
                 widget.delete(0, tk.END)
                 widget.insert(0, str(value))
@@ -332,35 +459,67 @@ class WordFormatterGUI:
         self.debug_text = scrolledtext.ScrolledText(log_frame, height=10, state='disabled', wrap=tk.WORD)
         self.debug_text.pack(fill=tk.BOTH, expand=True)
 
-        right_frame = ttk.Frame(main_pane, padding=5, width=680)
+        right_frame = ttk.Frame(main_pane, padding=4, width=660)
         main_pane.add(right_frame, weight=4)
-        
-        canvas = tk.Canvas(right_frame, highlightthickness=0, width=660)
-        v_scrollbar = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=v_scrollbar.set)
-        
-        params_container = ttk.Frame(canvas)
-        canvas_window = canvas.create_window((0, 0), window=params_container, anchor='nw')
-        
-        params_frame = ttk.LabelFrame(params_container, text="参数设置", padding=10)
-        params_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        params_frame.columnconfigure(1, weight=1)
-        params_frame.columnconfigure(3, weight=1)
-        params_frame.columnconfigure(5, weight=1)
 
-        # Helper functions for creating widgets
-        def create_entry(label, var_name, r, c):
-            ttk.Label(params_frame, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=2)
-            entry = ttk.Entry(params_frame, width=10)
-            entry.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=2)
+        config_area = ttk.Frame(right_frame)
+        config_canvas = tk.Canvas(config_area, highlightthickness=0, width=620)
+        config_scrollbar = ttk.Scrollbar(config_area, orient=tk.VERTICAL, command=config_canvas.yview)
+        config_canvas.configure(yscrollcommand=config_scrollbar.set)
+        config_frame = ttk.Frame(config_canvas, padding=(6, 4))
+        config_window = config_canvas.create_window((0, 0), window=config_frame, anchor='nw')
+        for column in (1, 3):
+            config_frame.columnconfigure(column, weight=1)
+
+        def refresh_config_scrollregion(_event=None):
+            config_canvas.configure(scrollregion=config_canvas.bbox("all"))
+
+        def fit_config_width(event):
+            config_canvas.itemconfig(config_window, width=event.width)
+
+        config_frame.bind('<Configure>', refresh_config_scrollregion)
+        config_canvas.bind('<Configure>', fit_config_width)
+        config_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        config_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def event_from_right_config(widget):
+            while widget is not None:
+                if widget == right_frame:
+                    return True
+                widget = getattr(widget, 'master', None)
+            return False
+
+        def on_config_mousewheel(event):
+            if not event_from_right_config(event.widget):
+                return
+            try:
+                if not config_canvas.winfo_exists():
+                    return
+                if getattr(event, 'num', None) == 4:
+                    config_canvas.yview_scroll(-3, "units")
+                elif getattr(event, 'num', None) == 5:
+                    config_canvas.yview_scroll(3, "units")
+                else:
+                    config_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except tk.TclError:
+                pass
+
+        right_frame.bind_all("<MouseWheel>", on_config_mousewheel, add="+")
+        right_frame.bind_all("<Button-4>", on_config_mousewheel, add="+")
+        right_frame.bind_all("<Button-5>", on_config_mousewheel, add="+")
+
+        def create_entry(parent, label, var_name, r, c, width=8):
+            ttk.Label(parent, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=1)
+            entry = ttk.Entry(parent, width=width)
+            entry.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=1)
             self.entries[var_name] = entry
             return entry
-        
-        def create_combo(label, var_name, opts, r, c, readonly=True): 
-            ttk.Label(params_frame, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=2)
+
+        def create_combo(parent, label, var_name, opts, r, c, readonly=True, width=12):
+            ttk.Label(parent, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=1)
             state = 'readonly' if readonly else 'normal'
-            combo = ttk.Combobox(params_frame, values=opts, state=state, width=13)
-            combo.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=2)
+            combo = ttk.Combobox(parent, values=opts, state=state, width=width)
+            combo.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=1)
             if self.font_separator in opts:
                 combo._last_valid_value = ''
 
@@ -380,174 +539,243 @@ class WordFormatterGUI:
             self.entries[var_name] = combo
             return combo
 
-        def create_font_size_combo(label, var_name, r, c):
-            ttk.Label(params_frame, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=2)
-            combo = ttk.Combobox(params_frame, values=list(self.font_size_map.keys()), width=13)
-            combo.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=2)
+        def create_font_size_combo(parent, label, var_name, r, c):
+            ttk.Label(parent, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=1)
+            combo = ttk.Combobox(parent, values=list(self.font_size_map.keys()), width=12)
+            combo.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=1)
             self.entries[var_name] = combo
             return combo
 
-        def create_section_header(text, help_text, r):
-            header_frame = ttk.Frame(params_frame)
-            header_frame.grid(row=r, column=0, columnspan=6, sticky='ew', pady=(6, 2))
+        def create_unit_combo(parent, var_name, values, r, c):
+            combo = ttk.Combobox(parent, values=values, state='readonly', width=6)
+            combo.grid(row=r, column=c, sticky=tk.EW, padx=3, pady=1)
+            combo._is_unit_combo = True
+            self.entries[var_name] = combo
+            return combo
+
+        def create_section_header(parent, text, help_text, r):
+            header_frame = ttk.Frame(parent)
+            header_frame.grid(row=r, column=0, columnspan=4, sticky='ew', pady=(6, 1))
             ttk.Label(header_frame, text=text, font=('Helvetica', 9, 'bold')).pack(side=tk.LEFT)
             if help_text:
                 help_label = ttk.Label(header_frame, text="(?)", foreground="blue", cursor="hand2")
                 help_label.pack(side=tk.LEFT, padx=(2, 0))
                 help_label.bind("<Button-1>", lambda e, t=text, m=help_text: self._show_help_tooltip(f"{t} - 识别规则", m))
-            ttk.Separator(params_frame, orient='horizontal').grid(row=r+1, column=0, columnspan=6, sticky='ew')
+            ttk.Separator(parent, orient='horizontal').grid(row=r+1, column=0, columnspan=4, sticky='ew')
             return r + 2
 
-        row = 0
-        
-        # Section: Page Layout
-        row = create_section_header("页面设置", None, row)
-        create_entry("上边距(cm)", 'margin_top', row, 0)
-        create_entry("下边距(cm)", 'margin_bottom', row, 2)
-        create_entry("页脚距(cm)", 'footer_distance', row, 4)
+        def create_spacing_control(parent, label, pt_key, unit_key, multiple_key, r):
+            ttk.Label(parent, text=label).grid(row=r, column=0, sticky=tk.W, padx=3, pady=1)
+            value_frame = ttk.Frame(parent)
+            value_frame.grid(row=r, column=1, sticky=tk.EW, padx=3, pady=1)
+            value_frame.columnconfigure(0, weight=1)
+            pt_entry = ttk.Entry(value_frame, width=8)
+            multiple_entry = ttk.Entry(value_frame, width=8)
+            pt_entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            multiple_entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            suffix_label = ttk.Label(value_frame, text=UNIT_VALUE_SUFFIX['pt'], width=4)
+            suffix_label.grid(row=0, column=1, sticky=tk.W)
+            self.entries[pt_key] = pt_entry
+            self.entries[multiple_key] = multiple_entry
+            ttk.Label(parent, text="单位").grid(row=r, column=2, sticky=tk.W, padx=3, pady=1)
+            unit_combo = create_unit_combo(parent, unit_key, ['磅值', '倍数'], r, 3)
+            control = {
+                'unit': unit_combo,
+                'pt': pt_entry,
+                'multiple': multiple_entry,
+                'suffix': suffix_label,
+            }
+            self.spacing_controls.append(control)
+            unit_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_spacing_controls(), add="+")
+            return [pt_entry, multiple_entry, unit_combo]
+
+        def create_indent_controls(parent, r):
+            ttk.Label(parent, text="缩进单位").grid(row=r, column=0, sticky=tk.W, padx=3, pady=1)
+            unit_combo = create_unit_combo(parent, 'paragraph_indent_unit', ['厘米', '字符'], r, 1)
+            unit_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_indent_controls(), add="+")
+            r += 1
+            ttk.Label(parent, text="左缩进").grid(row=r, column=0, sticky=tk.W, padx=3, pady=1)
+            left_frame = ttk.Frame(parent)
+            left_frame.grid(row=r, column=1, sticky=tk.EW, padx=3, pady=1)
+            left_frame.columnconfigure(0, weight=1)
+            left_cm = ttk.Entry(left_frame, width=8)
+            left_chars = ttk.Entry(left_frame, width=8)
+            left_cm.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            left_chars.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            left_suffix = ttk.Label(left_frame, text=UNIT_VALUE_SUFFIX['cm'], width=4)
+            left_suffix.grid(row=0, column=1, sticky=tk.W)
+            self.entries['left_indent_cm'] = left_cm
+            self.entries['left_indent_chars'] = left_chars
+            ttk.Label(parent, text="右缩进").grid(row=r, column=2, sticky=tk.W, padx=3, pady=1)
+            right_frame_inner = ttk.Frame(parent)
+            right_frame_inner.grid(row=r, column=3, sticky=tk.EW, padx=3, pady=1)
+            right_frame_inner.columnconfigure(0, weight=1)
+            right_cm = ttk.Entry(right_frame_inner, width=8)
+            right_chars = ttk.Entry(right_frame_inner, width=8)
+            right_cm.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            right_chars.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            right_suffix = ttk.Label(right_frame_inner, text=UNIT_VALUE_SUFFIX['cm'], width=4)
+            right_suffix.grid(row=0, column=1, sticky=tk.W)
+            self.entries['right_indent_cm'] = right_cm
+            self.entries['right_indent_chars'] = right_chars
+            r += 1
+            ttk.Label(parent, text="首行缩进").grid(row=r, column=0, sticky=tk.W, padx=3, pady=1)
+            first_line_frame = ttk.Frame(parent)
+            first_line_frame.grid(row=r, column=1, sticky=tk.EW, padx=3, pady=1)
+            first_line_frame.columnconfigure(0, weight=1)
+            first_line_chars = ttk.Entry(first_line_frame, width=8)
+            first_line_chars.grid(row=0, column=0, sticky=tk.EW, padx=(0, 3))
+            ttk.Label(first_line_frame, text=UNIT_VALUE_SUFFIX['chars'], width=4).grid(
+                row=0, column=1, sticky=tk.W
+            )
+            self.entries['first_line_indent_chars'] = first_line_chars
+            self.indent_controls.append({
+                'unit': unit_combo,
+                'cm_widgets': [left_cm, right_cm],
+                'char_widgets': [left_chars, right_chars],
+                'suffix_labels': [left_suffix, right_suffix],
+            })
+            return r + 1
+
+        page_frame = config_frame
+        title_frame = config_frame
+        body_frame = config_frame
+        table_frame = config_frame
+        advanced_frame = config_frame
+
+        row = create_section_header(page_frame, "页面设置", None, 0)
+        create_entry(page_frame, "上边距(cm)", 'margin_top', row, 0)
+        create_entry(page_frame, "下边距(cm)", 'margin_bottom', row, 2)
         row += 1
-        create_entry("左边距(cm)", 'margin_left', row, 0)
-        create_entry("右边距(cm)", 'margin_right', row, 2)
-        ttk.Checkbutton(params_frame, text="强制设置为A4纸张", variable=self.force_a4_var).grid(row=row, column=4, columnspan=2, sticky=tk.W, padx=3)
+        create_entry(page_frame, "左边距(cm)", 'margin_left', row, 0)
+        create_entry(page_frame, "右边距(cm)", 'margin_right', row, 2)
         row += 1
-        create_combo("页码对齐", 'page_number_align', ['奇偶分页', '居中'], row, 0)
-        create_combo("页码字体", 'page_number_font', self.font_options['page_number'], row, 2, readonly=False)
-        create_font_size_combo("页码字号", 'page_number_size', row, 4)
+        create_entry(page_frame, "页脚距(cm)", 'footer_distance', row, 0)
+        ttk.Checkbutton(page_frame, text="强制设置为A4纸张", variable=self.force_a4_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        create_combo(page_frame, "页码对齐", 'page_number_align', ['奇偶分页', '居中'], row, 0)
+        row += 1
+        create_combo(page_frame, "页码字体", 'page_number_font', self.font_options['page_number'], row, 0, readonly=False)
+        create_font_size_combo(page_frame, "页码字号", 'page_number_size', row, 2)
         row += 1
 
-        # Section: Document Title
         title_help = "• 主标题: 识别文档开头的连续【居中】且【字体字号相同】的段落。\n• 副标题: 主标题下方，同样【居中】但【字体字号与主标题不同】的段落。\n• TXT文件: 会将首个非层级标题的段落视为题目。"
-        row = create_section_header("标题样式", title_help, row)
-        create_combo("题目字体", 'title_font', self.font_options['title'], row, 0, readonly=False)
-        create_font_size_combo("题目字号", 'title_size', row, 2)
-        create_entry("题目行距(磅)", 'title_line_spacing', row, 4)
+        row = create_section_header(title_frame, "文章标题", title_help, row)
+        create_combo(title_frame, "题目字体", 'title_font', self.font_options['title'], row, 0, readonly=False)
+        create_font_size_combo(title_frame, "题目字号", 'title_size', row, 2)
         row += 1
-        create_combo("副标题字体", 'subtitle_font', self.font_options['subtitle'], row, 0, readonly=False)
-        create_font_size_combo("副标题字号", 'subtitle_size', row, 2)
-        create_entry("副标题行距(磅)", 'subtitle_line_spacing', row, 4)
+        create_spacing_control(title_frame, "题目行距", 'title_line_spacing', 'title_line_spacing_unit', 'title_line_spacing_multiple', row)
         row += 1
-        
-        # Section: Body and Headings
+        create_combo(title_frame, "副标题字体", 'subtitle_font', self.font_options['subtitle'], row, 0, readonly=False)
+        create_font_size_combo(title_frame, "副标题字号", 'subtitle_size', row, 2)
+        row += 1
+        create_spacing_control(title_frame, "副标题行距", 'subtitle_line_spacing', 'subtitle_line_spacing_unit', 'subtitle_line_spacing_multiple', row)
+        row += 1
+        ttk.Checkbutton(title_frame, text="题目加粗", variable=self.title_bold_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
         headings_help = '• 一级标题: "一、", "二、" ...\n• 二级标题: "（一）", "（二）" ...\n• 三级标题: "1.", "2." ...\n• 四级标题: "(1)", "(2)" ...\n\n注：正文、三级、四级标题共用一套字体字号。'
-        row = create_section_header("正文与层级", headings_help, row)
-        create_combo("一级标题字体", 'h1_font', self.font_options['h1'], row, 0, readonly=False)
-        create_font_size_combo("一级标题字号", 'h1_size', row, 2)
+        row = create_section_header(title_frame, "层级标题", headings_help, row)
+        create_combo(title_frame, "一级标题字体", 'h1_font', self.font_options['h1'], row, 0, readonly=False)
+        create_font_size_combo(title_frame, "一级标题字号", 'h1_size', row, 2)
         row += 1
-        create_combo("二级标题字体", 'h2_font', self.font_options['h2'], row, 0, readonly=False)
-        create_font_size_combo("二级标题字号", 'h2_size', row, 2)
+        create_combo(title_frame, "二级标题字体", 'h2_font', self.font_options['h2'], row, 0, readonly=False)
+        create_font_size_combo(title_frame, "二级标题字号", 'h2_size', row, 2)
         row += 1
-        create_combo("正文/三四级字体", 'body_font', self.font_options['body'], row, 0, readonly=False)
-        create_font_size_combo("正文/三四级字号", 'body_size', row, 2)
-        create_entry("正文行距(磅)", 'line_spacing', row, 4)
-        row += 1
-        create_entry("段落左缩进(cm)", 'left_indent_cm', row, 0)
-        create_entry("段落右缩进(cm)", 'right_indent_cm', row, 2)
+        ttk.Checkbutton(title_frame, text="一级标题加粗", variable=self.h1_bold_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(title_frame, text="二级标题加粗", variable=self.h2_bold_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
 
-        # Section: Table Content
+        row = create_section_header(body_frame, "正文设置", None, row)
+        create_combo(body_frame, "正文/三四级字体", 'body_font', self.font_options['body'], row, 0, readonly=False)
+        create_font_size_combo(body_frame, "正文/三四级字号", 'body_size', row, 2)
+        row += 1
+        create_spacing_control(body_frame, "正文行距", 'line_spacing', 'line_spacing_unit', 'line_spacing_multiple', row)
+        row += 1
+        row = create_section_header(body_frame, "段落缩进", None, row)
+        row = create_indent_controls(body_frame, row)
+        row += 1
+
         table_help = (
             "• 默认不启用表格自动调整，启用后才会调整表头/内容字体、字号、行距、行高、列宽和边框。\n"
             "• 默认保留单元格原始对齐方式；勾选智能对齐后，表头/序号/短文本居中，数字靠右，长文本靠左。"
         )
-        row = create_section_header("表格内容（实验功能）", table_help, row)
-        ttk.Checkbutton(params_frame, text="启用表格自动调整（总开关）", variable=self.enable_table_var, command=self._update_table_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=2)
-        table_auto_col_width_check = ttk.Checkbutton(params_frame, text="自动调整列宽", variable=self.table_auto_col_width_var)
-        table_auto_col_width_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=2)
-        table_unified_borders_check = ttk.Checkbutton(params_frame, text="统一表格边框", variable=self.table_unified_borders_var)
-        table_unified_borders_check.grid(row=row, column=4, columnspan=2, sticky=tk.W, padx=3, pady=2)
+        row = create_section_header(table_frame, "表格内容", table_help, row)
+        ttk.Checkbutton(table_frame, text="启用表格自动调整", variable=self.enable_table_var, command=self._update_table_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        table_auto_col_width_check = ttk.Checkbutton(table_frame, text="自动调整列宽", variable=self.table_auto_col_width_var)
+        table_auto_col_width_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
-        table_header_font_combo = create_combo("表头字体", 'table_header_font', self.font_options['table'], row, 0, readonly=False)
-        table_font_combo = create_combo("表格字体", 'table_font', self.font_options['table'], row, 2, readonly=False)
-        table_size_combo = create_font_size_combo("表格字号", 'table_size', row, 4)
+        table_unified_borders_check = ttk.Checkbutton(table_frame, text="统一表格边框", variable=self.table_unified_borders_var)
+        table_unified_borders_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        table_header_bold_check = ttk.Checkbutton(table_frame, text="表头行加粗", variable=self.table_header_bold_var)
+        table_header_bold_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
-        table_line_spacing_entry = create_entry("表格行距(磅)", 'table_line_spacing', row, 0)
-        table_row_height_entry = create_entry("表格行高(cm)", 'table_row_height_cm', row, 2)
-        table_width_percent_entry = create_entry("表格宽度(%)", 'table_width_percent', row, 4)
+        table_header_font_combo = create_combo(table_frame, "表头字体", 'table_header_font', self.font_options['table'], row, 0, readonly=False)
+        table_font_combo = create_combo(table_frame, "表格字体", 'table_font', self.font_options['table'], row, 2, readonly=False)
         row += 1
-        table_border_size_entry = create_entry("边框粗细(pt)", 'table_border_size_pt', row, 0)
-        table_header_bold_check = ttk.Checkbutton(params_frame, text="表头行加粗", variable=self.table_header_bold_var)
-        table_header_bold_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=2)
-        table_smart_align_check = ttk.Checkbutton(params_frame, text="智能调整单元格对齐", variable=self.table_smart_align_var)
-        table_smart_align_check.grid(row=row, column=4, columnspan=2, sticky=tk.W, padx=3, pady=2)
+        table_size_combo = create_font_size_combo(table_frame, "表格字号", 'table_size', row, 0)
+        table_smart_align_check = ttk.Checkbutton(table_frame, text="智能调整单元格对齐", variable=self.table_smart_align_var)
+        table_smart_align_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        table_spacing_widgets = create_spacing_control(table_frame, "表格行距", 'table_line_spacing', 'table_line_spacing_unit', 'table_line_spacing_multiple', row)
+        row += 1
+        table_row_height_entry = create_entry(table_frame, "表格行高(cm)", 'table_row_height_cm', row, 0)
+        table_width_percent_entry = create_entry(table_frame, "表格宽度(%)", 'table_width_percent', row, 2)
+        row += 1
+        table_border_size_entry = create_entry(table_frame, "边框粗细(pt)", 'table_border_size_pt', row, 0)
         self.table_option_widgets = [
             table_auto_col_width_check, table_unified_borders_check,
             table_header_font_combo, table_font_combo, table_size_combo,
-            table_line_spacing_entry, table_row_height_entry, table_width_percent_entry,
+            *table_spacing_widgets, table_row_height_entry, table_width_percent_entry,
             table_border_size_entry, table_header_bold_check, table_smart_align_check
         ]
         self._update_table_state()
         row += 1
-        
-        # Section: Other Elements
-        other_help = '• 图/表标题: 自动查找图片或表格【上方或下方】最近的、居中的、以"图"或"表"开头的段落。\n• 附件标识: 识别"附件1"、"附件："等独立段落。启用后将自动【段前分页】并按主副标题规则识别其自身标题。'
-        row = create_section_header("其他元素", other_help, row)
-        create_combo("表格标题字体", 'table_caption_font', self.font_options['table_caption'], row, 0, readonly=False)
-        create_font_size_combo("表格标题字号", 'table_caption_size', row, 2)
+        other_help = '• 图/表标题: 自动查找图片或表格【上方或下方】最近的、居中的、以"图"或"表"开头的段落。'
+        row = create_section_header(table_frame, "图表标题", other_help, row)
+        create_combo(table_frame, "表格标题字体", 'table_caption_font', self.font_options['table_caption'], row, 0, readonly=False)
+        create_font_size_combo(table_frame, "表格标题字号", 'table_caption_size', row, 2)
         row += 1
-        create_combo("图形标题字体", 'figure_caption_font', self.font_options['figure_caption'], row, 0, readonly=False)
-        create_font_size_combo("图形标题字号", 'figure_caption_size', row, 2)
+        create_combo(table_frame, "图形标题字体", 'figure_caption_font', self.font_options['figure_caption'], row, 0, readonly=False)
+        create_font_size_combo(table_frame, "图形标题字号", 'figure_caption_size', row, 2)
         row += 1
-        ttk.Checkbutton(params_frame, text="启用附件格式化", variable=self.enable_attachment_var, command=self._update_attachment_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=2)
-        attachment_font_combo = create_combo("附件标识字体", 'attachment_font', self.font_options['attachment'], row, 2, readonly=False)
-        attachment_size_combo = create_font_size_combo("附件标识字号", 'attachment_size', row, 4)
+
+        attachment_help = '• 附件标识: 识别"附件1"、"附件："等独立段落。启用后将自动【段前分页】并按主副标题规则识别其自身标题。'
+        row = create_section_header(advanced_frame, "附件与增强", attachment_help, row)
+        ttk.Checkbutton(advanced_frame, text="启用附件格式化", variable=self.enable_attachment_var, command=self._update_attachment_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        attachment_font_combo = create_combo(advanced_frame, "附件标识字体", 'attachment_font', self.font_options['attachment'], row, 2, readonly=False)
+        row += 1
+        attachment_size_combo = create_font_size_combo(advanced_frame, "附件标识字号", 'attachment_size', row, 0)
         self.attachment_option_widgets = [attachment_font_combo, attachment_size_combo]
         self._update_attachment_state()
         row += 1
-
-        # Section: Global Options
-        ttk.Separator(params_frame, orient='horizontal').grid(row=row, column=0, columnspan=6, sticky='ew', pady=5)
-        row += 1
-        ttk.Checkbutton(params_frame, text="自动设置大纲级别 (用于生成导航目录)", variable=self.set_outline_var).grid(row=row, columnspan=6, sticky=tk.W, padx=3)
+        row = create_section_header(advanced_frame, "全局选项", None, row)
+        ttk.Checkbutton(advanced_frame, text="自动设置大纲级别", variable=self.set_outline_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(advanced_frame, text="启用符号标准化", variable=self.normalize_punctuation_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         ttk.Checkbutton(
-            params_frame,
+            advanced_frame,
             text="自定义数字和字母字体",
             variable=self.use_custom_english_font_var,
             command=self._update_english_font_state
-        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3)
-        create_combo("数字和字母字体", 'english_font', self.font_options['english'], row, 2, readonly=False)
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        create_combo(advanced_frame, "数字和字母字体", 'english_font', self.font_options['english'], row, 2, readonly=False)
         self._update_english_font_state()
         row += 1
-        blank_line_combo = create_combo("TXT/MD空行处理", 'blank_line_mode', BLANK_LINE_MODE_OPTIONS, row, 0)
-        blank_line_combo.configure(width=34)
-        blank_line_combo.grid_configure(columnspan=5)
-        row += 1
+        blank_line_combo = create_combo(advanced_frame, "TXT/MD空行处理", 'blank_line_mode', BLANK_LINE_MODE_OPTIONS, row, 0, width=34)
+        blank_line_combo.grid_configure(columnspan=3)
 
-        # 按钮区域
-        ttk.Checkbutton(params_frame, text="启用符号标准化（实验功能，保守修复中英文标点混用）", variable=self.normalize_punctuation_var).grid(row=row, columnspan=6, sticky=tk.W, padx=3)
-        row += 1
+        self._refresh_spacing_controls()
+        self._refresh_indent_controls()
 
-        button_frame = ttk.Frame(params_container)
-        button_frame.pack(fill=tk.X, pady=5)
-        
-        # 配置按钮 - 2x2布局
-        config_buttons = ttk.Frame(button_frame)
-        config_buttons.pack(fill=tk.X, pady=(0, 5))
+        config_buttons = ttk.Frame(right_frame)
+        config_buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         ttk.Button(config_buttons, text="加载配置", command=self.load_config).grid(row=0, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="保存配置", command=self.save_config).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="保存为默认", command=self.save_default_config).grid(row=1, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="恢复内置默认", command=self.load_defaults).grid(row=1, column=1, sticky='ew', padx=2, pady=2)
         config_buttons.columnconfigure(0, weight=1)
         config_buttons.columnconfigure(1, weight=1)
-
-        # 配置Canvas滚动
-        def on_canvas_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            # 调整Canvas内容宽度以适应Canvas
-            canvas_width = event.width
-            canvas.itemconfig(canvas_window, width=canvas_width)
-
-        canvas.bind('<Configure>', on_canvas_configure)
-        
-        # 添加鼠标滚轮支持
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        # 布局Canvas和滚动条
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        config_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self._update_listbox_placeholder()
 
@@ -652,12 +880,16 @@ class WordFormatterGUI:
         self.table_header_bold_var.set(loaded_config.get('table_header_bold', True))
         self.table_smart_align_var.set(loaded_config.get('table_smart_align', False))
         self.table_unified_borders_var.set(loaded_config.get('table_unified_borders', True))
+        self.title_bold_var.set(loaded_config.get('title_bold', False))
+        self.h1_bold_var.set(loaded_config.get('h1_bold', False))
+        self.h2_bold_var.set(loaded_config.get('h2_bold', False))
         boolean_keys = [
             'set_outline', 'enable_attachment_formatting', 'force_a4',
             'use_custom_english_font', 'use_times_new_roman',
             'remove_blank_lines', 'normalize_punctuation',
             'enable_table_formatting', 'table_auto_col_width', 'table_header_bold',
-            'table_smart_align', 'table_unified_borders'
+            'table_smart_align', 'table_unified_borders',
+            'title_bold', 'h1_bold', 'h2_bold'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -668,6 +900,8 @@ class WordFormatterGUI:
         self._update_english_font_state()
         self._update_attachment_state()
         self._update_table_state()
+        self._refresh_spacing_controls()
+        self._refresh_indent_controls()
 
     def load_defaults(self):
         self._apply_config(self.default_params)
@@ -678,6 +912,8 @@ class WordFormatterGUI:
             value = widget.get().strip()
             if isinstance(widget, ttk.Combobox) and value == self.font_separator:
                 value = getattr(widget, '_last_valid_value', '').strip()
+            if isinstance(widget, ttk.Combobox) and getattr(widget, '_is_unit_combo', False):
+                value = UNIT_DISPLAY_TO_CONFIG.get(value, value)
             if value == '' and key in self.default_params:
                 config[key] = self.default_params[key]
                 continue
@@ -702,6 +938,9 @@ class WordFormatterGUI:
         config['table_header_bold'] = self.table_header_bold_var.get()
         config['table_smart_align'] = self.table_smart_align_var.get()
         config['table_unified_borders'] = self.table_unified_borders_var.get()
+        config['title_bold'] = self.title_bold_var.get()
+        config['h1_bold'] = self.h1_bold_var.get()
+        config['h2_bold'] = self.h2_bold_var.get()
         return config
 
     def save_config(self):

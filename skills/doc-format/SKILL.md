@@ -12,7 +12,8 @@ description: 公文格式排版工具。将 doc/docx/wps/txt/md 文档按照公�
 - 支持 `.docx`、`.doc`、`.wps`、`.txt`、`.md`。
 - 支持单文件、多文件、重复 `-i`、位置参数输入，以及一个或多个目录；目录输入默认递归扫描，输出目录保留原结构。
 - 自动识别题目、副标题、四级标题、二级标题段内正文、图/表标题、附件标识。
-- 可选表格内容自动调整、数字和字母单独字体、符号标准化。
+- 行距支持默认磅值模式和 Word 倍数模式；段落缩进支持厘米和字符两种单位。
+- 可选题目/一级标题/二级标题强制加粗、表格内容自动调整、数字和字母单独字体、符号标准化。
 - TXT/MD 支持三种空行模式：不改动任何空行；删除单个空行，多个空行保留至 1 个空行；保留单个空行，多个空行保留至 1 个空行。
 - TXT/MD 中手写数字编号（如 `1.`、`1.2.3`）按源文档保留，不自动递增重排。
 - 支持自动读取当前目录 `wfp_config.json`、指定 JSON 配置文件、内联 JSON、`--set key=value` 和便利开关覆盖配置。
@@ -51,6 +52,12 @@ python scripts/wfp_cli.py format -i old.doc --soffice /Applications/LibreOffice.
 # 临时覆盖配置
 python scripts/wfp_cli.py format -i input.docx --set body_size=12 --enable-table-formatting
 
+# 正文行距改为 1.5 倍
+python scripts/wfp_cli.py format -i input.docx --set line_spacing_unit=multiple --set line_spacing_multiple=1.5
+
+# 段落缩进改为字符单位
+python scripts/wfp_cli.py format -i input.docx --set paragraph_indent_unit=chars --set left_indent_chars=0 --set right_indent_chars=0 --set first_line_indent_chars=2
+
 # 内联 JSON 覆盖配置
 python scripts/wfp_cli.py format -i input.docx --config-json "{\"force_a4\": true, \"line_spacing\": 30}"
 
@@ -80,6 +87,10 @@ python scripts/wfp_cli.py test
 4. 再运行 `format` 处理文档。
 
 用户只要求一次性临时调整时，可用 `--config-json` 或 `--set` 直接运行 `format`。
+
+行距字段默认使用磅值：正文 `line_spacing`、题目 `title_line_spacing`、副标题 `subtitle_line_spacing`、表格 `table_line_spacing`。如需倍数行距，将对应 `*_line_spacing_unit` 设为 `multiple`，并设置对应 `*_line_spacing_multiple`；倍数默认 `1.0`。
+
+段落缩进默认使用厘米：`paragraph_indent_unit=cm` 时读取 `left_indent_cm/right_indent_cm`。如需按字符缩进，设为 `paragraph_indent_unit=chars`，并使用 `left_indent_chars/right_indent_chars/first_line_indent_chars`。
 
 ## 输出行为
 

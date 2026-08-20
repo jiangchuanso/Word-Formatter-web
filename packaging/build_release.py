@@ -44,10 +44,14 @@ REUSED_ASSET_URLS = {
 }
 
 
-def run(cmd: list[str], cwd: Path | None = None) -> None:
+def run(
+    cmd: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     printable = " ".join(str(part) for part in cmd)
     print(f"+ {printable}")
-    subprocess.run(cmd, cwd=str(cwd or ROOT), check=True)
+    subprocess.run(cmd, cwd=str(cwd or ROOT), check=True, env=env)
 
 
 def python_stdout(py: Path, code: str) -> str:
@@ -103,6 +107,58 @@ def ensure_tk_available(py: Path) -> None:
             "Install Tk support for the target Python, or run this script with a Python that includes Tk. "
             f"Details: {detail}"
         ) from exc
+
+
+def windows_tcl_tk_build_env(py: Path) -> dict[str, str]:
+    base_prefix = Path(python_stdout(py, "import sys; print(sys.base_prefix)"))
+    patchlevel = python_stdout(
+        py,
+        "import tkinter; print(tkinter.Tcl().eval('info patchlevel'))",
+    )
+    version_dir = ".".join(patchlevel.split(".")[:2])
+    candidates = [
+        (
+            base_prefix / "lib" / f"tcl{version_dir}",
+            base_prefix / "lib" / f"tk{version_dir}",
+        ),
+        (
+            base_prefix / "tcl" / f"tcl{version_dir}",
+            base_prefix / "tcl" / f"tk{version_dir}",
+        ),
+        (
+            base_prefix / "Library" / "lib" / f"tcl{version_dir}",
+            base_prefix / "Library" / "lib" / f"tk{version_dir}",
+        ),
+    ]
+    for tcl_library, tk_library in candidates:
+        init_tcl = tcl_library / "init.tcl"
+        tk_tcl = tk_library / "tk.tcl"
+        if not init_tcl.exists() or not tk_tcl.exists():
+            continue
+        init_text = init_tcl.read_text(encoding="utf-8", errors="ignore")
+        tk_text = tk_tcl.read_text(encoding="utf-8", errors="ignore")
+        tcl_matches = any(
+            "package require -exact Tcl" in line and patchlevel in line
+            for line in init_text.splitlines()
+        )
+        tk_matches = any(
+            "package require -exact Tk" in line and patchlevel in line
+            for line in tk_text.splitlines()
+        )
+        if tcl_matches and tk_matches:
+            env = os.environ.copy()
+            env["TCL_LIBRARY"] = str(tcl_library)
+            env["TK_LIBRARY"] = str(tk_library)
+            print(
+                f"Windows Tcl/Tk build data: {patchlevel} "
+                f"({tcl_library}, {tk_library})"
+            )
+            return env
+
+    raise SystemExit(
+        "Could not find Tcl/Tk script data matching the _tkinter runtime "
+        f"version {patchlevel} under {base_prefix}."
+    )
 
 
 def pyinstaller_base(py: Path, target: str) -> list[str]:
@@ -217,6 +273,7 @@ def build_windows(args: argparse.Namespace) -> Path:
     require_host("Windows", args.force)
     py = prepare_clean_venv("windows", reuse=args.reuse_venv)
     ensure_tk_available(py)
+    build_env = windows_tcl_tk_build_env(py)
     exe_name = f"{APP_BINARY_BASENAME}.v{__version__}"
     dist_dir = BUILD_ROOT / "windows" / "dist"
     run(
@@ -227,7 +284,8 @@ def build_windows(args: argparse.Namespace) -> Path:
             "--name",
             exe_name,
             str(ROOT / "wfp.py"),
-        ]
+        ],
+        env=build_env,
     )
 
     built = dist_dir / f"{exe_name}.exe"
