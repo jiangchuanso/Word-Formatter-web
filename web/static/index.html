@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Word 文档智能排版工具 · 在线版</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --primary: #2f7d4f;
+    --primary-dark: #256040;
+    --accent: #1a73e8;
+    --border: #e2e6ea;
+    --text: #1f2329;
+    --muted: #6b7280;
+    --danger: #d93025;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+  }
+  header {
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    color: #fff; padding: 18px 28px; box-shadow: 0 2px 8px rgba(0,0,0,.1);
+  }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; opacity: .9; font-size: 13px; }
+  .container { max-width: 1280px; margin: 20px auto; padding: 0 20px;
+    display: grid; grid-template-columns: 1fr 1.1fr; gap: 20px; }
+  @media (max-width: 980px) { .container { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  .card h2 { margin: 0 0 14px; font-size: 16px; border-left: 4px solid var(--primary);
+    padding-left: 10px; }
+  .section { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px;
+    padding: 12px 14px; }
+  .section > .sec-title { font-weight: 700; font-size: 14px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .sec-title .help { color: var(--accent); font-size: 13px; cursor: help; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px 12px; }
+  @media (max-width: 560px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+  label.field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+  label.field input, label.field select {
+    font-size: 13px; padding: 6px 8px; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff; color: var(--text); }
+  label.check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  .checkgroup { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tab { flex: 1; text-align: center; padding: 8px; border: 1px solid var(--border);
+    border-radius: 6px; cursor: pointer; font-size: 14px; background: #fff; }
+  .tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .dropzone { border: 2px dashed var(--border); border-radius: 8px; padding: 20px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .2s; }
+  .dropzone.drag { border-color: var(--primary); background: #f0f7f2; }
+  textarea { width: 100%; min-height: 180px; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px; font-size: 13px; resize: vertical; }
+  #fileList { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; }
+  #fileList li { display: flex; justify-content: space-between; padding: 5px 8px;
+    background: #f0f4f8; border-radius: 5px; margin-bottom: 5px; }
+  #fileList li button { border: none; background: none; color: var(--danger); cursor: pointer; }
+  .btn { display: inline-block; padding: 10px 18px; border: none; border-radius: 8px;
+    font-size: 14px; cursor: pointer; background: var(--primary); color: #fff; font-weight: 600; }
+  .btn:hover { background: var(--primary-dark); }
+  .btn:disabled { opacity: .6; cursor: not-allowed; }
+  .btn.secondary { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+  .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  #progressWrap { margin-top: 14px; display: none; }
+  #progressBar { height: 8px; background: #e8edf1; border-radius: 4px; overflow: hidden; }
+  #progressFill { height: 100%; width: 0; background: var(--primary); transition: width .2s; }
+  #log { margin-top: 12px; background: #0f172a; color: #cfe3d4; border-radius: 8px;
+    padding: 12px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    white-space: pre-wrap; max-height: 280px; overflow: auto; display: none; }
+  #result { margin-top: 14px; }
+  .result-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; color: #fff; }
+  .badge.ok { background: var(--primary); }
+  .badge.warn { background: #c77c0a; }
+  .badge.err { background: var(--danger); }
+  .download-btn { font-size: 13px; padding: 6px 12px; }
+  .toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--text); color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; pointer-events: none; transition: .3s; z-index: 50; }
+  .toast.show { opacity: .95; }
+  .footnote { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  details summary { cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="appTitle">Word 文档智能排版工具 · 在线版</h1>
+  <p id="appSub">上传文件或输入文本，调整页面格式参数，一键生成规范排版文档。</p>
+</header>
+
+<div class="container">
+  <!-- 左栏：输入 + 参数 -->
+  <div>
+    <div class="card">
+      <h2>1. 选择输入方式</h2>
+      <div class="tabs">
+        <div class="tab active" id="tabFile">上传文件</div>
+        <div class="tab" id="tabText">直接输入文本</div>
+      </div>
+
+      <div id="filePanel">
+        <div class="dropzone" id="dropzone">点击或拖拽文件到此处（支持 .docx/.doc/.wps/.txt/.md）</div>
+        <input type="file" id="fileInput" multiple accept=".docx,.doc,.wps,.txt,.md" style="display:none" />
+        <ul id="fileList"></ul>
+        <div class="footnote">支持批量上传，每个文件独立排版后输出 <code>_formatted.docx</code>。</div>
+      </div>
+
+      <div id="textPanel" style="display:none">
+        <textarea id="textInput" placeholder="在此粘贴或输入要排版的文本……"></textarea>
+        <div class="footnote">直接输入文本将自动强制使用 A4 纸张。</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px">
+      <h2>2. 参数设置</h2>
+      <div class="actions" style="margin-top:0;margin-bottom:12px">
+        <button class="btn secondary" id="resetBtn">恢复内置默认</button>
+        <button class="btn secondary" id="saveTplBtn">保存模板配置</button>
+        <button class="btn secondary" id="exportTplBtn">导出模板配置</button>
+        <button class="btn secondary" id="importTplBtn">导入模板配置</button>
+        <input type="file" id="importTplInput" accept=".json,application/json" style="display:none" />
+        <span class="footnote" style="margin:0">参数与本地版一致；下方分组可点击展开/收起。</span>
+      </div>
+      <div id="paramForm"></div>
+    </div>
+  </div>
+
+  <!-- 右栏：执行 + 结果 -->
+  <div>
+    <div class="card">
+      <h2>3. 开始排版</h2>
+      <div class="actions">
+        <button class="btn" id="runBtn">开始排版</button>
+      </div>
+      <div id="progressWrap">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px" id="progressText">处理中…</div>
+        <div id="progressBar"><div id="progressFill"></div></div>
+      </div>
+      <div id="log"></div>
+      <div id="result"></div>
+    </div>
+    <div class="card" style="margin-top:20px">
+      <h2>使用说明</h2>
+      <ul style="font-size:13px;color:var(--muted);line-height:1.7;padding-left:18px;margin:0">
+        <li><b>智能识别</b>：自动识别主/副标题、一~四级层级标题、图/表标题、附件等。</li>
+        <li><b>原始文件安全</b>：所有操作在服务器端临时副本上进行，<b>不会修改</b>你的源文件。</li>
+        <li><b>旧格式</b>：.doc/.wps 由服务器端 Office/WPS（Windows）或 LibreOffice（Linux/macOS）转换。</li>
+        <li><b>批量</b>：上传多个文件，逐一处理并返回各自下载链接。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let SCHEMA = null;
+let filesData = [];   // {name, file}
+let mode = 'file';    // 'file' | 'text'
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// ---------- 拉取 schema ----------
+async function loadSchema() {
+  const r = await fetch('/api/schema');
+  SCHEMA = await r.json();
+  $('#appTitle').textContent = SCHEMA.app_title + ' · 在线版';
+  $('#appSub').textContent = 'v' + SCHEMA.version + ' · 上传文件或输入文本，调整页面格式参数，一键生成规范排版文档。';
+  buildForm();
+}
+
+// ---------- 构建参数表单 ----------
+function field(label, key, type, opts) {
+  if (type === 'number') {
+    return `<label class="field">${label}<input type="number" step="any" data-key="${key}" data-type="number"></label>`;
+  }
+  if (type === 'select') {
+    const options = opts.map(o => `<option value="${o}">${o}</option>`).join('');
+    return `<label class="field">${label}<select data-key="${key}" data-type="select">${options}</select></label>`;
+  }
+  if (type === 'fontsize') {
+    const options = SCHEMA.font_size_keys.map(k => `<option value="${k}">${k}</option>`).join('');
+    return `<label class="field">${label}<select data-key="${key}" data-type="fontsize">${options}</select></label>`;
+  }
+}
+
+function fontOptions(group) {
+  return SCHEMA.preset_font_options[group] || [];
+}
+
+function buildForm() {
+  const d = SCHEMA.default_config;
+  const html = [];
+
+  // 页面设置
+  html.push(`<div class="section"><div class="sec-title">页面设置 <span class="help" title="上/下/左/右边距、页脚距、A4 强制、页码对齐/字体/字号">(?)</span></div>
+    <div class="grid3">
+      ${field('上边距(cm)','margin_top','number')}
+      ${field('下边距(cm)','margin_bottom','number')}
+      ${field('页脚距(cm)','footer_distance','number')}
+      ${field('左边距(cm)','margin_left','number')}
+      ${field('右边距(cm)','margin_right','number')}
+      ${field('页码对齐','page_number_align','select',['奇偶分页','居中'])}
+      ${field('页码字体','page_number_font','select',fontOptions('page_number'))}
+      ${field('页码字号','page_number_size','fontsize')}
+    </div>
+    <div class="checkgroup" style="margin-top:10px">
+      <label class="check"><input type="checkbox" data-key="force_a4" data-type="bool"> 强制设置为 A4 纸张</label>
+    </div>
+  </div>`);
+
+  // 标题样式
+  html.push(`<div class="section"><div class="sec-title">标题样式 <span class="help" title="主标题识别文档开头连续居中且字体字号相同的段落；副标题在其下且字号不同。TXT 首个非层级段落视为题目。">(?)</span></div>
+    <div class="grid3">
+      ${field('题目字体','title_font','select',fontOptions('title'))}
+      ${field('题目字号','title_size','fontsize')}
+      ${field('题目行距(磅)','title_line_spacing','number')}
+      ${field('副标题字体','subtitle_font','select',fontOptions('subtitle'))}
+      ${field('副标题字号','subtitle_size','fontsize')}
+      ${field('副标题行距(磅)','subtitle_line_spacing','number')}
+    </div>
+  </div>`);
+
+  // 正文与层级
+  html.push(`<div class="section"><div class="sec-title">正文与层级 <span class="help" title="一级：一、二、；二级：（一）（二）；三级：1. 2.；四级：(1)(2)。正文/三四级共用一套字体字号。">(?)</span></div>
+    <div class="grid3">
+      ${field('一级标题字体','h1_font','select',fontOptions('h1'))}
+      ${field('一级标题字号','h1_size','fontsize')}
+      ${field('二级标题字体','h2_font','select',fontOptions('h2'))}
+      ${field('二级标题字号','h2_size','fontsize')}
+      ${field('正文/三四级字体','body_font','select',fontOptions('body'))}
+      ${field('正文/三四级字号','body_size','fontsize')}
+      ${field('正文行距(磅)','line_spacing','number')}
+      ${field('段落左缩进(cm)','left_indent_cm','number')}
+      ${field('段落右缩进(cm)','right_indent_cm','number')}
+    </div>
+  </div>`);
+
+  // 表格内容
+  html.push(`<div class="section"><div class="sec-title">表格内容（实验功能） <span class="help" title="启用后调整表头/内容字体、字号、行距、行高、列宽、边框；可智能对齐。">(?)</span></div>
+    <div class="checkgroup" style="margin-bottom:8px">
+      <label class="check"><input type="checkbox" data-key="enable_table_formatting" data-type="bool"> 启用表格自动调整（总开关）</label>
+      <label class="check"><input type="checkbox" data-key="table_auto_col_width" data-type="bool"> 自动调整列宽</label>
+      <label class="check"><input type="checkbox" data-key="table_unified_borders" data-type="bool"> 统一表格边框</label>
+      <label class="check"><input type="checkbox" data-key="table_header_bold" data-type="bool"> 表头行加粗</label>
+      <label class="check"><input type="checkbox" data-key="table_smart_align" data-type="bool"> 智能调整单元格对齐</label>
+    </div>
+    <div class="grid3">
+      ${field('表头字体','table_header_font','select',fontOptions('table'))}
+      ${field('表格字体','table_font','select',fontOptions('table'))}
+      ${field('表格字号','table_size','fontsize')}
+      ${field('表格行距(磅)','table_line_spacing','number')}
+      ${field('表格行高(cm)','table_row_height_cm','number')}
+      ${field('表格宽度(%)','table_width_percent','number')}
+      ${field('边框粗细(pt)','table_border_size_pt','number')}
+      ${field('列宽下限(%)','table_col_min_pct','number')}
+      ${field('列宽上限(%)','table_col_max_pct','number')}
+      ${field('短文本对齐字数','table_short_text_len','number')}
+    </div>
+  </div>`);
+
+  // 其他元素
+  html.push(`<div class="section"><div class="sec-title">其他元素 <span class="help" title="图/表标题：查找图片或表格上下最近居中的以图/表开头的段落。附件：识别“附件1”等独立段落，启用后段前分页并按标题规则处理。">(?)</span></div>
+    <div class="grid3">
+      ${field('表格标题字体','table_caption_font','select',fontOptions('table_caption'))}
+      ${field('表格标题字号','table_caption_size','fontsize')}
+      ${field('图形标题字体','figure_caption_font','select',fontOptions('figure_caption'))}
+      ${field('图形标题字号','figure_caption_size','fontsize')}
+    </div>
+    <div class="checkgroup" style="margin-top:8px">
+      <label class="check"><input type="checkbox" data-key="enable_attachment_formatting" data-type="bool"> 启用附件格式化</label>
+      ${field('附件标识字体','attachment_font','select',fontOptions('attachment'))}
+      ${field('附件标识字号','attachment_size','fontsize')}
+    </div>
+  </div>`);
+
+  // 全局选项
+  html.push(`<div class="section"><div class="sec-title">全局选项</div>
+    <label class="check"><input type="checkbox" data-key="set_outline" data-type="bool"> 自动设置大纲级别（用于生成导航目录）</label>
+    <div class="checkgroup" style="margin-top:8px">
+      <label class="check"><input type="checkbox" data-key="use_custom_english_font" data-type="bool"> 自定义数字和字母字体</label>
+      ${field('数字和字母字体','english_font','select',fontOptions('english'))}
+    </div>
+    <label class="field" style="margin-top:8px">TXT/MD 空行处理
+      <select data-key="blank_line_mode" data-type="select">${SCHEMA.blank_line_mode_options.map(o=>`<option value="${o}">${o}</option>`).join('')}</select>
+    </label>
+    <label class="check" style="margin-top:8px"><input type="checkbox" data-key="normalize_punctuation" data-type="bool"> 启用符号标准化（实验功能，保守修复中英文标点混用）</label>
+  </div>`);
+
+  $('#paramForm').innerHTML = html.join('');
+  applyDefaults();
+  loadSavedTemplateOnStart();
+}
+
+function applyDefaults() {
+  const d = SCHEMA.default_config;
+  $('#paramForm').querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    const val = d[key];
+    if (val === undefined) return;
+    if (el.dataset.type === 'bool') {
+      el.checked = !!val;
+    } else if (el.dataset.type === 'fontsize') {
+      // 找到最接近的显示文案
+      const reverse = Object.entries(SCHEMA.font_size_map).find(([, v]) => Math.abs(v - val) < 1e-6);
+      el.value = reverse ? reverse[0] : String(val);
+    } else {
+      el.value = val;
+    }
+  });
+}
+
+function collectConfig() {
+  const cfg = {};
+  $('#paramForm').querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    if (el.dataset.type === 'bool') {
+      cfg[key] = el.checked;
+    } else {
+      cfg[key] = el.value;
+    }
+  });
+  return cfg;
+}
+
+// ---------- 模板配置：localStorage 保存 / 读取 / 导出 / 导入 ----------
+const TPL_STORAGE_KEY = 'wfp_template_config';
+
+function applyConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  $('#paramForm').querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    if (key in cfg) {
+      const val = cfg[key];
+      if (el.dataset.type === 'bool') {
+        el.checked = !!val;
+      } else if (el.dataset.type === 'fontsize') {
+        // 兼容两种存储形式：显示文案（下拉框选项值，如"三号 (16pt)"）
+        // 或数值磅值（如从 CLI 导出的 JSON 中 16）
+        let label = null;
+        if (typeof val === 'number' || !(String(val) in SCHEMA.font_size_map)) {
+          const numeric = Number(val);
+          if (!isNaN(numeric)) {
+            const hit = Object.entries(SCHEMA.font_size_map)
+              .find(([, v]) => Math.abs(v - numeric) < 1e-6);
+            label = hit ? hit[0] : null;
+          }
+        }
+        el.value = label || String(val);
+      } else {
+        el.value = val;
+      }
+    }
+  });
+}
+
+$('#saveTplBtn').addEventListener('click', () => {
+  try {
+    localStorage.setItem(TPL_STORAGE_KEY, JSON.stringify(collectConfig()));
+    toast('模板配置已保存到浏览器本地');
+  } catch (e) {
+    toast('保存失败：' + e.message);
+  }
+});
+
+$('#exportTplBtn').addEventListener('click', () => {
+  const cfg = collectConfig();
+  const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'word_formatter_template.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('模板配置已导出为 JSON 文件');
+});
+
+$('#importTplBtn').addEventListener('click', () => $('#importTplInput').click());
+$('#importTplInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const cfg = JSON.parse(reader.result);
+      applyConfig(cfg);
+      toast('已导入模板配置');
+    } catch (err) {
+      toast('导入失败：文件格式不正确');
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+// 页面加载后若有本地保存的模板配置则自动应用
+function loadSavedTemplateOnStart() {
+  try {
+    const saved = localStorage.getItem(TPL_STORAGE_KEY);
+    if (saved) applyConfig(JSON.parse(saved));
+  } catch (_) { /* 忽略损坏的本地数据 */ }
+}
+
+// ---------- 文件上传 ----------
+const dz = $('#dropzone');
+dz.addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', e => addFiles(e.target.files));
+['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
+['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
+dz.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+
+function addFiles(fileList) {
+  for (const f of fileList) {
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (!SCHEMA.supported_extensions.includes('.' + ext)) {
+      toast('跳过不支持的文件：' + f.name);
+      continue;
+    }
+    if (filesData.some(x => x.name === f.name)) continue;
+    filesData.push({ name: f.name, file: f });
+  }
+  renderFileList();
+}
+function renderFileList() {
+  const ul = $('#fileList'); ul.innerHTML = '';
+  filesData.forEach((x, i) => {
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.textContent = x.name;
+    li.appendChild(span);
+    const b = document.createElement('button'); b.textContent = '移除';
+    b.onclick = () => { filesData.splice(i, 1); renderFileList(); };
+    li.appendChild(b); ul.appendChild(li);
+  });
+}
+
+// ---------- 标签页切换 ----------
+$('#tabFile').addEventListener('click', () => switchMode('file'));
+$('#tabText').addEventListener('click', () => switchMode('text'));
+function switchMode(m) {
+  mode = m;
+  $('#tabFile').classList.toggle('active', m === 'file');
+  $('#tabText').classList.toggle('active', m === 'text');
+  $('#filePanel').style.display = m === 'file' ? '' : 'none';
+  $('#textPanel').style.display = m === 'text' ? '' : 'none';
+}
+
+$('#resetBtn').addEventListener('click', () => { applyDefaults(); toast('已恢复内置默认参数'); });
+
+// ---------- 执行排版 ----------
+$('#runBtn').addEventListener('click', run);
+
+async function run() {
+  const cfg = collectConfig();
+  $('#runBtn').disabled = true;
+  $('#progressWrap').style.display = 'block';
+  $('#log').style.display = 'block';
+  $('#log').textContent = '';
+  $('#result').innerHTML = '';
+  setProgress(5, '准备中…');
+
+  try {
+    let resp;
+    if (mode === 'file') {
+      if (filesData.length === 0) { toast('请先添加文件'); resetRun(); return; }
+      const fd = new FormData();
+      fd.append('config', JSON.stringify(cfg));
+      filesData.forEach(x => fd.append('files', x.file, x.name));
+      setProgress(15, `已上传 ${filesData.length} 个文件，开始排版…`);
+      resp = await fetch('/api/format', { method: 'POST', body: fd });
+    } else {
+      const text = $('#textInput').value.trim();
+      if (!text) { toast('请输入文本内容'); resetRun(); return; }
+      const fd = new FormData();
+      fd.append('config', JSON.stringify(cfg));
+      fd.append('text', text);
+      setProgress(20, '开始排版文本…');
+      resp = await fetch('/api/format-text', { method: 'POST', body: fd });
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || ('请求失败：' + resp.status));
+    }
+    const data = await resp.json();
+    renderLog(data.log || '');
+    setProgress(100, '完成');
+    renderResult(data);
+  } catch (e) {
+    $('#log').textContent += '\n❌ ' + e.message;
+    setProgress(100, '处理失败');
+    toast('处理出错：' + e.message);
+  } finally {
+    resetRun();
+  }
+}
+
+function resetRun() { $('#runBtn').disabled = false; }
+
+function setProgress(pct, text) {
+  $('#progressFill').style.width = pct + '%';
+  $('#progressText').textContent = text;
+}
+function renderLog(log) {
+  if (log) $('#log').textContent = log;
+}
+function renderResult(data) {
+  const box = $('#result'); box.innerHTML = '';
+  if (data.results) {
+    data.results.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'result-item';
+      let badge = '';
+      if (r.status === 'success') badge = '<span class="badge ok">成功</span>';
+      else if (r.status === 'skipped') badge = '<span class="badge warn">跳过</span>';
+      else badge = '<span class="badge err">失败</span>';
+      let right = badge;
+      if (r.status === 'success') {
+        right += ` <a class="btn download-btn" href="${escapeHtml(r.url)}" download>下载</a>`;
+      } else if (r.reason) {
+        right += ` <span style="color:var(--danger);font-size:12px">${escapeHtml(r.reason)}</span>`;
+      }
+      div.innerHTML = `<span>${escapeHtml(r.file)}</span><span>${right}</span>`;
+      box.appendChild(div);
+    });
+    if (data.skipped_unsupported && data.skipped_unsupported.length) {
+      const note = document.createElement('div');
+      note.className = 'footnote';
+      note.textContent = '不支持的文件已跳过：' + data.skipped_unsupported.join(', ');
+      box.appendChild(note);
+    }
+  } else if (data.url) {
+    const div = document.createElement('div');
+    div.className = 'result-item';
+    div.innerHTML = `<span>formatted_document.docx</span><a class="btn download-btn" href="${data.url}" download>下载</a>`;
+    box.appendChild(div);
+  }
+}
+
+loadSchema();
+</script>
+</body>
+</html>
