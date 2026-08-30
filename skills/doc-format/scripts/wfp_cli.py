@@ -116,6 +116,9 @@ CONFIG_DESCRIPTIONS = {
     "table_smart_align": ("表格智能对齐", "true/false"),
     "table_unified_borders": ("统一表格边框", "true/false"),
     "table_border_size_pt": ("表格边框粗细", "pt"),
+    "table_col_min_pct": ("列宽下限", "百分比"),
+    "table_col_max_pct": ("列宽上限", "百分比"),
+    "table_short_text_len": ("短文本对齐字数", "字符数"),
 }
 
 

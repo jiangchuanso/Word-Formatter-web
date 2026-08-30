@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     'table_row_height_cm': 0.7, 'table_auto_col_width': True, 'table_width_percent': 100,
     'table_header_bold': True, 'table_smart_align': False,
     'table_unified_borders': True, 'table_border_size_pt': 0.5,
+    'table_col_min_pct': 8, 'table_col_max_pct': 45, 'table_short_text_len': 4,
 }
 
 PRESET_FONT_OPTIONS = {
