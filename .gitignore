@@ -14,3 +14,6 @@ build/
 dist/
 *.spec
 release/
+
+# Agent working memory (.codebuddy) - local only, do not push
+.codebuddy/
