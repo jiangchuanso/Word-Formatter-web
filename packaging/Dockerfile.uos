@@ -1,0 +1,96 @@
+ARG UOS_BASE_IMAGE=macrosan/uos:v20-1060
+FROM ${UOS_BASE_IMAGE}
+
+ARG TARGETARCH=arm64
+ARG PYTHON_VERSION=3.12
+ARG CONDA_CHANNEL=conda-forge
+ARG MINIFORGE_BASE_URL=https://github.com/conda-forge/miniforge/releases/latest/download
+ARG APPIMAGETOOL_BASE_URL=https://github.com/AppImage/appimagetool/releases/download/continuous
+
+# TARGETARCH uses Docker names. The downloaded projects use aarch64/x86_64.
+RUN case "${TARGETARCH}" in \
+      arm64) archive_arch=aarch64 ;; \
+      amd64) archive_arch=x86_64 ;; \
+      *) echo "Unsupported Docker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && printf '%s' "${archive_arch}" >/tmp/wfp-archive-arch
+
+RUN if ! command -v objdump >/dev/null \
+      || ! command -v bzip2 >/dev/null \
+      || ! command -v curl >/dev/null \
+      || ! command -v file >/dev/null \
+      || ! command -v find >/dev/null \
+      || ! command -v tar >/dev/null \
+      || ! command -v xz >/dev/null; then \
+      yum install -y \
+        binutils \
+        bzip2 \
+        ca-certificates \
+        curl \
+        file \
+        findutils \
+        gzip \
+        tar \
+        xz \
+      && yum clean all; \
+    fi
+
+RUN if [ ! -x /opt/conda/bin/conda ]; then \
+      archive_arch="$(cat /tmp/wfp-archive-arch)" \
+      && curl -fL \
+        --retry 10 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --continue-at - \
+        "${MINIFORGE_BASE_URL}/Miniforge3-Linux-${archive_arch}.sh" \
+        -o /tmp/miniforge.sh \
+      && bash /tmp/miniforge.sh -b -p /opt/conda \
+      && rm -f /tmp/miniforge.sh; \
+    fi
+
+# Do not relax the xft build constraint. The noxft Tk build starts normally but
+# displays CJK labels as literal \uXXXX text on Linux. CONDA_CHANNEL may point to
+# an internal mirror when conda-forge is slow or unavailable.
+RUN rm -rf /opt/wfp-build \
+    && for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+      CONDA_REMOTE_CONNECT_TIMEOUT_SECS=5 \
+      CONDA_REMOTE_READ_TIMEOUT_SECS=30 \
+      CONDA_REMOTE_MAX_RETRIES=1 \
+      /opt/conda/bin/conda create -y --solver classic \
+        --override-channels -c "${CONDA_CHANNEL}" \
+        --repodata-fn current_repodata.json \
+        -p /opt/wfp-build \
+        python="${PYTHON_VERSION}" pip "tk=*=xft_*" && break; \
+      if [ "$attempt" = 10 ]; then exit 1; fi; \
+      sleep 3; \
+    done \
+    && /opt/conda/bin/conda clean -afy
+
+RUN if [ ! -x /usr/local/bin/appimagetool ]; then \
+      archive_arch="$(cat /tmp/wfp-archive-arch)" \
+      && curl -fL \
+        --retry 10 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --continue-at - \
+        "${APPIMAGETOOL_BASE_URL}/appimagetool-${archive_arch}.AppImage" \
+        -o /usr/local/bin/appimagetool \
+      && chmod +x /usr/local/bin/appimagetool; \
+    fi
+
+ENV PATH=/opt/wfp-build/bin:/opt/conda/bin:${PATH}
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_RETRIES=20
+
+RUN case "${TARGETARCH}" in \
+      arm64) expected_arch=aarch64 ;; \
+      amd64) expected_arch=x86_64 ;; \
+    esac \
+    && test "$(uname -m)" = "${expected_arch}" \
+    && python --version \
+    && python -c "import tkinter; print('Tk', tkinter.TkVersion)" \
+    && conda list -p /opt/wfp-build tk | grep '^tk ' | grep -q 'xft_' \
+    && objdump --version | head -n 1
+
+WORKDIR /workspace
