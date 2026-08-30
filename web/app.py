@@ -238,7 +238,7 @@ async def format_files(
             + "）",
         )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     results = []
     # 串行执行：WPS/Word COM 应用实例与 pythoncom 线程初始化并非线程安全，
     # 并行调用会导致 "应用程序正忙" 或 COM 初始化冲突，故逐个文件处理。
@@ -295,7 +295,7 @@ async def format_text(
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = job_output_dir / "formatted_document.docx"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         logs = await loop.run_in_executor(
             None, _run_format_text, text, str(out_path), coerced
