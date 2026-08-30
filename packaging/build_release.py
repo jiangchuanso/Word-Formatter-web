@@ -349,13 +349,18 @@ def prepare_appdir(binary: Path, appdir: Path) -> None:
     shutil.copy2(icon, appdir / ".DirIcon")
 
 
-def build_kylin(args: argparse.Namespace) -> Path:
+def build_linux_desktop(
+    args: argparse.Namespace,
+    *,
+    target: str,
+    artifact_label: str,
+) -> Path:
     require_host("Linux", args.force)
-    py = prepare_clean_venv("kylin", reuse=args.reuse_venv)
+    py = prepare_clean_venv(target, reuse=args.reuse_venv)
     ensure_tk_available(py)
-    dist_dir = BUILD_ROOT / "kylin" / "dist"
+    dist_dir = BUILD_ROOT / target / "dist"
     run(
-        pyinstaller_base(py, "kylin")
+        pyinstaller_base(py, target)
         + [
             "--onefile",
             "--name",
@@ -369,20 +374,23 @@ def build_kylin(args: argparse.Namespace) -> Path:
         raise SystemExit(f"Missing Linux binary: {built}")
 
     arch = args.arch or platform.machine()
-    appdir = BUILD_ROOT / "kylin" / "AppDir"
+    appdir = BUILD_ROOT / target / "AppDir"
     prepare_appdir(built, appdir)
 
     appimagetool = args.appimagetool or shutil.which("appimagetool")
-    artifact = RELEASE_DIR / f"{APP_BINARY_BASENAME}.v{__version__}.Kylin-V10.{arch}.AppImage"
-    if args.no_appimage:
+    artifact_base = RELEASE_DIR / f"{APP_BINARY_BASENAME}.v{__version__}.{artifact_label}.{arch}"
+    raw_artifact = artifact_base
+    if args.no_appimage or args.also_raw:
         RELEASE_DIR.mkdir(exist_ok=True)
-        fallback = RELEASE_DIR / f"{APP_BINARY_BASENAME}.v{__version__}.Kylin-V10.{arch}"
-        shutil.copy2(built, fallback)
-        print(f"artifact: {fallback}")
-        return fallback
+        shutil.copy2(built, raw_artifact)
+        raw_artifact.chmod(raw_artifact.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"artifact: {raw_artifact}")
+    if args.no_appimage:
+        return raw_artifact
     if not appimagetool:
         raise SystemExit("appimagetool not found. Install it or pass --appimagetool, or use --no-appimage.")
 
+    artifact = artifact_base.with_name(f"{artifact_base.name}.AppImage")
     RELEASE_DIR.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.setdefault("ARCH", arch)
@@ -391,6 +399,14 @@ def build_kylin(args: argparse.Namespace) -> Path:
     artifact.chmod(artifact.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"artifact: {artifact}")
     return artifact
+
+
+def build_kylin(args: argparse.Namespace) -> Path:
+    return build_linux_desktop(args, target="kylin", artifact_label="Kylin-V10")
+
+
+def build_uos(args: argparse.Namespace) -> Path:
+    return build_linux_desktop(args, target="uos", artifact_label="UOS-V20")
 
 
 def download_reused_assets(args: argparse.Namespace) -> list[Path]:
@@ -425,11 +441,27 @@ def main(argv: list[str] | None = None) -> int:
     add_build_options(win)
     win.set_defaults(func=build_windows)
 
+    def add_linux_build_options(build_parser: argparse.ArgumentParser) -> None:
+        add_build_options(build_parser)
+        build_parser.add_argument("--appimagetool", help="Path to appimagetool.")
+        build_parser.add_argument(
+            "--no-appimage",
+            action="store_true",
+            help="Emit only the PyInstaller Linux binary without wrapping AppImage.",
+        )
+        build_parser.add_argument(
+            "--also-raw",
+            action="store_true",
+            help="Emit the raw PyInstaller Linux binary in addition to the AppImage.",
+        )
+
     kylin = subparsers.add_parser("kylin", help="Build Kylin/Linux AppImage on Linux/Kylin.")
-    add_build_options(kylin)
-    kylin.add_argument("--appimagetool", help="Path to appimagetool.")
-    kylin.add_argument("--no-appimage", action="store_true", help="Emit the PyInstaller Linux binary without wrapping AppImage.")
+    add_linux_build_options(kylin)
     kylin.set_defaults(func=build_kylin)
+
+    uos = subparsers.add_parser("uos", help="Build UnionTech UOS AppImage on UOS/Linux.")
+    add_linux_build_options(uos)
+    uos.set_defaults(func=build_uos)
 
     reused = subparsers.add_parser("reused-assets", help="Download reusable Windows/Kylin assets and rename them for the current version.")
     reused.add_argument("--overwrite", action="store_true", help="Overwrite existing files in release/.")

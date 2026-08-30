@@ -145,6 +145,16 @@ python3 packaging/build_release.py kylin --arch x86_64 \
 # 不封装 AppImage，只生成普通 Linux 可执行文件
 python3 packaging/build_release.py kylin --arch x86_64 --no-appimage
 
+# UOS V20 ARM64：在 Apple Silicon Mac 或其他 ARM64 Docker 主机上一键构建
+bash packaging/build_uos_docker.sh aarch64
+
+# UOS V20 x86_64：在 Windows PowerShell + Docker Desktop 中构建
+powershell -ExecutionPolicy Bypass -File packaging/build_uos_docker.ps1 -Arch x86_64
+
+# 生成两个 UOS ARM64 产物：AppImage 和普通可执行文件
+# release/Word-Formatter-Pro.v2.7.7.UOS-V20.aarch64.AppImage
+# release/Word-Formatter-Pro.v2.7.7.UOS-V20.aarch64
+
 # 也可在 x86_64 Docker 环境中通过 Miniforge/conda-forge 固定 Python 3.12
 # 构建 Kylin V10 SP1 版本
 docker build --platform linux/amd64 \
