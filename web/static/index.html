@@ -180,8 +180,16 @@ function escapeHtml(s) {
 
 // ---------- 拉取 schema ----------
 async function loadSchema() {
-  const r = await fetch('/api/schema');
-  SCHEMA = await r.json();
+  try {
+    const r = await fetch('/api/schema');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    SCHEMA = await r.json();
+  } catch (e) {
+    $('#appTitle').textContent = '服务连接失败';
+    $('#appSub').textContent = '无法加载参数配置（' + e.message + '），请检查服务后刷新页面重试。';
+    toast('加载参数配置失败，请刷新重试');
+    return;
+  }
   $('#appTitle').textContent = SCHEMA.app_title + ' · 在线版';
   $('#appSub').textContent = 'v' + SCHEMA.version + ' · 上传文件或输入文本，调整页面格式参数，一键生成规范排版文档。';
   buildForm();
@@ -310,6 +318,19 @@ function buildForm() {
   loadSavedTemplateOnStart();
 }
 
+// 按磅值找字号显示文案；无精确匹配时取最接近的文案，避免下拉框显示空白
+function fontSizeLabel(val) {
+  const entries = Object.entries(SCHEMA.font_size_map);
+  const hit = entries.find(([, v]) => Math.abs(v - val) < 1e-6);
+  if (hit) return hit[0];
+  let best = SCHEMA.font_size_keys[0], bestDiff = Infinity;
+  for (const [k, v] of entries) {
+    const diff = Math.abs(v - Number(val));
+    if (diff < bestDiff) { bestDiff = diff; best = k; }
+  }
+  return best;
+}
+
 function applyDefaults() {
   const d = SCHEMA.default_config;
   $('#paramForm').querySelectorAll('[data-key]').forEach(el => {
@@ -320,8 +341,7 @@ function applyDefaults() {
       el.checked = !!val;
     } else if (el.dataset.type === 'fontsize') {
       // 找到最接近的显示文案
-      const reverse = Object.entries(SCHEMA.font_size_map).find(([, v]) => Math.abs(v - val) < 1e-6);
-      el.value = reverse ? reverse[0] : String(val);
+      el.value = fontSizeLabel(val);
     } else {
       el.value = val;
     }
@@ -355,16 +375,12 @@ function applyConfig(cfg) {
       } else if (el.dataset.type === 'fontsize') {
         // 兼容两种存储形式：显示文案（下拉框选项值，如"三号 (16pt)"）
         // 或数值磅值（如从 CLI 导出的 JSON 中 16）
-        let label = null;
         if (typeof val === 'number' || !(String(val) in SCHEMA.font_size_map)) {
           const numeric = Number(val);
-          if (!isNaN(numeric)) {
-            const hit = Object.entries(SCHEMA.font_size_map)
-              .find(([, v]) => Math.abs(v - numeric) < 1e-6);
-            label = hit ? hit[0] : null;
-          }
+          el.value = isNaN(numeric) ? SCHEMA.font_size_keys[0] : fontSizeLabel(numeric);
+        } else {
+          el.value = String(val);
         }
-        el.value = label || String(val);
       } else {
         el.value = val;
       }
@@ -424,7 +440,7 @@ function loadSavedTemplateOnStart() {
 // ---------- 文件上传 ----------
 const dz = $('#dropzone');
 dz.addEventListener('click', () => $('#fileInput').click());
-$('#fileInput').addEventListener('change', e => addFiles(e.target.files));
+$('#fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 ['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
 ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
 dz.addEventListener('drop', e => addFiles(e.dataTransfer.files));

@@ -342,7 +342,11 @@ def format_paths(args):
         input_paths.extend(args.inputs)
     input_paths.extend(args.paths or [])
 
-    config, config_source = load_config_with_overrides(args)
+    try:
+        config, config_source = load_config_with_overrides(args)
+    except Exception as exc:
+        print(f"配置加载失败: {exc}", file=sys.stderr)
+        return 1
     log = _stderr_log(args.verbose)
     if log:
         log(f"使用配置: {config_source}")

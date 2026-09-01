@@ -19,8 +19,8 @@ WEB="$ROOT/web"
 # 服务监听端口，可通过环境变量 WFP_PORT 覆盖
 : "${WFP_PORT:=4615}"
 export WFP_PORT
-# 优先使用 python3
-PYTHON_BIN="$(command -v python3 || command -v python)"
+# 优先使用 python3（两个都找不到时用 true 兜底，避免 set -e 直接退出而跳过下方提示）
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
 if [ -z "$PYTHON_BIN" ]; then
     echo "未找到 Python，请先安装 Python 3.9+。"
     exit 1

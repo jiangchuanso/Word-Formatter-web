@@ -201,6 +201,8 @@ async def format_files(
         raw_config = json.loads(config)
     except Exception:
         raise HTTPException(status_code=400, detail="参数格式错误")
+    if not isinstance(raw_config, dict):
+        raise HTTPException(status_code=400, detail="参数格式错误：config 应为对象")
 
     coerced = _coerce_config(raw_config)
 
@@ -211,7 +213,6 @@ async def format_files(
     job_upload_dir = UPLOAD_DIR / job_id
     job_output_dir = OUTPUT_DIR / job_id
     job_upload_dir.mkdir(parents=True, exist_ok=True)
-    job_output_dir.mkdir(parents=True, exist_ok=True)
 
     # 保存上传文件
     saved_paths = []
@@ -231,6 +232,7 @@ async def format_files(
         saved_paths.append((uf.filename or safe_name, str(dest)))
 
     if not saved_paths:
+        shutil.rmtree(job_upload_dir, ignore_errors=True)
         raise HTTPException(
             status_code=400,
             detail="没有可处理的文件（支持的格式："
@@ -238,12 +240,16 @@ async def format_files(
             + "）",
         )
 
+    job_output_dir.mkdir(parents=True, exist_ok=True)
+
     loop = asyncio.get_running_loop()
     results = []
     # 串行执行：WPS/Word COM 应用实例与 pythoncom 线程初始化并非线程安全，
     # 并行调用会导致 "应用程序正忙" 或 COM 初始化冲突，故逐个文件处理。
     for original_name, in_path in saved_paths:
-        base = os.path.splitext(original_name)[0]
+        # 只取文件名部分，防止 multipart filename 携带路径分量导致越界写入
+        clean_name = (original_name or "").replace("\\", "/").split("/")[-1]
+        base = os.path.splitext(clean_name)[0].strip() or "document"
         out_path = job_output_dir / f"{base}_formatted.docx"
         try:
             logs = await loop.run_in_executor(
@@ -285,6 +291,8 @@ async def format_text(
         raw_config = json.loads(config)
     except Exception:
         raise HTTPException(status_code=400, detail="参数格式错误")
+    if not isinstance(raw_config, dict):
+        raise HTTPException(status_code=400, detail="参数格式错误：config 应为对象")
 
     coerced = _coerce_config(raw_config)
     # 直接输入文本：强制 A4（与本地版一致）
@@ -346,7 +354,9 @@ def _run_format_text(text: str, output_path: str, config: dict):
 # --------------------------------------------------------------------------- #
 @app.get("/api/download/{job_id}/{filename}")
 async def download(job_id: str, filename: str):
-    # 防止路径穿越
+    # 防止路径穿越：job_id 必须是 32 位 hex，文件名不得含路径分量
+    if len(job_id) != 32 or any(c not in "0123456789abcdef" for c in job_id):
+        raise HTTPException(status_code=400, detail="非法任务 ID")
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="非法文件名")
     out_dir = OUTPUT_DIR / job_id
@@ -379,6 +389,6 @@ if __name__ == "__main__":
     import uvicorn
 
     host = os.environ.get("WFP_HOST", "0.0.0.0")
-    port = int(os.environ.get("WFP_PORT", "8000"))
+    port = int(os.environ.get("WFP_PORT", "4615"))
     logger.info("启动 %s v%s，监听 http://%s:%d", APP_TITLE, __version__, host, port)
     uvicorn.run(app, host=host, port=port)
