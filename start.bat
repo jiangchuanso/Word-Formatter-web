@@ -1,51 +1,51 @@
 @echo off
-title Word Formatter Pro - Web ·þÎñ
+title Word Formatter Pro - Web æœåŠ¡
 echo =========================================================================
-echo  Word Formatter Pro - Web °æÆô¶¯½Å±¾ (Windows)
-echo  ¹¦ÄÜ£º´´½¨/¼¤»î venv ÐéÄâ»·¾³£¬°²×°ÒÀÀµ£¬Æô¶¯ FastAPI ÍøÕ¾¡£
-echo  Ô­ÏîÄ¿ÎÄ¼þ²»»á±»ÐÞ¸Ä£»ËùÓÐÔÚÏß¹¦ÄÜÎ»ÓÚ web/ Ä¿Â¼¡£
-echo  ËùÐè Office / WPS£¨´¦Àí .doc/.wps£©»ò LibreOffice£¨Linux/macOS£©Ðë×°ÔÚ·þÎñÆ÷±¾»ú¡£
+echo  Word Formatter Pro - Web ç‰ˆå¯åŠ¨è„šæœ¬ (Windows)
+echo  åŠŸèƒ½ï¼šåˆ›å»º/æ¿€æ´» venv è™šæ‹ŸçŽ¯å¢ƒï¼Œå®‰è£…ä¾èµ–ï¼Œå¯åŠ¨ FastAPI ç½‘ç«™ã€‚
+echo  åŽŸé¡¹ç›®æ–‡ä»¶ä¸ä¼šè¢«ä¿®æ”¹ï¼›æ‰€æœ‰åœ¨çº¿åŠŸèƒ½ä½äºŽ web/ ç›®å½•ã€‚
+echo  æ‰€éœ€ Office / WPSï¼ˆå¤„ç† .doc/.wpsï¼‰æˆ– LibreOfficeï¼ˆLinux/macOSï¼‰é¡»è£…åœ¨æœåŠ¡å™¨æœ¬æœºã€‚
 echo =========================================================================
 setlocal enabledelayedexpansion
-echo ÏîÄ¿¸ùÄ¿Â¼£¨±¾ÎÄ¼þËùÔÚÄ¿Â¼£©
+echo é¡¹ç›®æ ¹ç›®å½•ï¼ˆæœ¬æ–‡ä»¶æ‰€åœ¨ç›®å½•ï¼‰
 set "ROOT=%~dp0"
 set "VENV=%ROOT%.venv"
 set "WEB=%ROOT%web"
-if not defined WFP_PORT set "WFP_PORT=4615"
-echo ¶Ë¿Ú: %WFP_PORT%£¨¿ÉÍ¨¹ý»·¾³±äÁ¿ WFP_PORT ¸²¸Ç£©
+if not defined WFP_PORT set "WFP_PORT=4616"
+echo ç«¯å£: %WFP_PORT%ï¼ˆå¯é€šè¿‡çŽ¯å¢ƒå˜é‡ WFP_PORT è¦†ç›–ï¼‰
 if not exist "%VENV%" (
-    echo [1/4] Î´¼ì²âµ½ÐéÄâ»·¾³£¬ÕýÔÚ´´½¨ venv ...
+    echo [1/4] æœªæ£€æµ‹åˆ°è™šæ‹ŸçŽ¯å¢ƒï¼Œæ­£åœ¨åˆ›å»º venv ...
     python -m venv "%VENV%"
     if errorlevel 1 (
-        echo ´´½¨ÐéÄâ»·¾³Ê§°Ü£¬ÇëÈ·ÈÏÒÑ°²×° Python 3.9+¡£
+        echo åˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒå¤±è´¥ï¼Œè¯·ç¡®è®¤å·²å®‰è£… Python 3.9+ã€‚
         pause
         exit /b 1
     )
 )
-echo [2/4] ¼¤»îÐéÄâ»·¾³ ...
-echo µ÷ÓÃ .venv\Scripts\activate.bat ¼¤»îÐéÄâ»·¾³£¬ºóÐø python/pip ¾ùÖ¸Ïò .venv
+echo [2/4] æ¿€æ´»è™šæ‹ŸçŽ¯å¢ƒ ...
+echo è°ƒç”¨ .venv\Scripts\activate.bat æ¿€æ´»è™šæ‹ŸçŽ¯å¢ƒï¼ŒåŽç»­ python/pip å‡æŒ‡å‘ .venv
 call "%VENV%\Scripts\activate.bat"
 if errorlevel 1 (
-    echo ÐéÄâ»·¾³¼¤»îÊ§°Ü£¬Çë¼ì²é .venv ÊÇ·ñÍêÕû¡£
+    echo è™šæ‹ŸçŽ¯å¢ƒæ¿€æ´»å¤±è´¥ï¼Œè¯·æ£€æŸ¥ .venv æ˜¯å¦å®Œæ•´ã€‚
     pause
     exit /b 1
 )
-echo [3/4] °²×°/¸üÐÂÒÀÀµ...
+echo [3/4] å®‰è£…/æ›´æ–°ä¾èµ–...
 python -m pip install -r "%WEB%\requirements.txt"
 if errorlevel 1 (
-    echo ÒÀÀµ°²×°Ê§°Ü£¬Çë¼ì²éÍøÂç»ò requirements.txt¡£
+    echo ä¾èµ–å®‰è£…å¤±è´¥ï¼Œè¯·æ£€æŸ¥ç½‘ç»œæˆ– requirements.txtã€‚
     pause
     exit /b 1
 )
-echo [4/4] Æô¶¯ÍøÕ¾ ...
+echo [4/4] å¯åŠ¨ç½‘ç«™ ...
 echo --------------------------------------------------------------
-echo  ·ÃÎÊµØÖ·:  http://localhost:%WFP_PORT%   (±¾»ú)
-echo            http://<·þÎñÆ÷IP>:%WFP_PORT%   (¾ÖÓòÍø/ÆäËûÉè±¸)
-echo  ¹Ø±ÕÍøÕ¾:  ÔÚÏÂ·½´°¿Ú°´ Ctrl+C
+echo  è®¿é—®åœ°å€:  http://localhost:%WFP_PORT%   (æœ¬æœº)
+echo            http://<æœåŠ¡å™¨IP>:%WFP_PORT%   (å±€åŸŸç½‘/å…¶ä»–è®¾å¤‡)
+echo  å…³é—­ç½‘ç«™:  åœ¨ä¸‹æ–¹çª—å£æŒ‰ Ctrl+C
 echo --------------------------------------------------------------
 python "%WEB%\app.py"
 if errorlevel 1 (
-    echo ÍøÕ¾Æô¶¯Ê§°Ü£¬Çë²é¿´ÉÏ·½´íÎóÐÅÏ¢¡£
+    echo ç½‘ç«™å¯åŠ¨å¤±è´¥ï¼Œè¯·æŸ¥çœ‹ä¸Šæ–¹é”™è¯¯ä¿¡æ¯ã€‚
     pause
 )
-endlocal
+endlocal

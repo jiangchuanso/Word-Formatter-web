@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$ROOT/.venv"
 WEB="$ROOT/web"
 # 服务监听端口，可通过环境变量 WFP_PORT 覆盖
-: "${WFP_PORT:=4615}"
+: "${WFP_PORT:=4616}"
 export WFP_PORT
 # 优先使用 python3（两个都找不到时用 true 兜底，避免 set -e 直接退出而跳过下方提示）
 PYTHON_BIN="$(command -v python3 || command -v python || true)"

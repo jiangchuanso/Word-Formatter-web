@@ -389,6 +389,6 @@ if __name__ == "__main__":
     import uvicorn
 
     host = os.environ.get("WFP_HOST", "0.0.0.0")
-    port = int(os.environ.get("WFP_PORT", "4615"))
+    port = int(os.environ.get("WFP_PORT", "4616"))
     logger.info("启动 %s v%s，监听 http://%s:%d", APP_TITLE, __version__, host, port)
     uvicorn.run(app, host=host, port=port)
