@@ -11,7 +11,7 @@ echo 项目根目录（本文件所在目录）
 set "ROOT=%~dp0"
 set "VENV=%ROOT%.venv"
 set "WEB=%ROOT%web"
-if not defined WFP_PORT set "WFP_PORT=4616"
+if not defined WFP_PORT set "WFP_PORT=4618"
 echo 端口: %WFP_PORT%（可通过环境变量 WFP_PORT 覆盖）
 if not exist "%VENV%" (
     echo [1/4] 未检测到虚拟环境，正在创建 venv ...
