@@ -404,3 +404,13 @@ A：不会。自动编号转文本依赖 WPS/Word COM，因此 macOS/Kylin/Linux
 ## 许可证 (License)
 
 本项目采用 [MIT License](LICENSE) 授权。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=cwyalpha%2Fword-formatter-pro&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cwyalpha/word-formatter-pro&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cwyalpha/word-formatter-pro&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cwyalpha/word-formatter-pro&type=date&legend=top-left" />
+ </picture>
+</a>
