@@ -428,7 +428,10 @@ class WordProcessor:
             doc_com.SaveAs2(os.path.abspath(temp_docx_path), FileFormat=12)
         finally:
             if doc_com is not None:
-                doc_com.Close()
+                try:
+                    doc_com.Close()
+                except Exception:
+                    pass
         self._log("文件格式转换完成。")
 
     def _convert_legacy_with_soffice(self, input_path, temp_docx_path):
@@ -1440,7 +1443,7 @@ class WordProcessor:
                             else:
                                 para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     
-    def _find_title_and_subtitle_paragraphs(self, doc, is_from_txt, start_index=0):
+    def _find_title_and_subtitle_paragraphs(self, doc, is_from_txt, start_index=0, exclude_indices=None, stop_at_body=False):
         """
         查找题目和副标题段落的索引范围
         返回: (title_indices, subtitle_indices)
@@ -1477,9 +1480,15 @@ class WordProcessor:
                     self._log("  > 发现一级/二级标题，在此之前未找到居中题目。")
                     return [], []
                 if self._get_paragraph_alignment(para) == WD_ALIGN_PARAGRAPH.CENTER:
+                    if exclude_indices and idx in exclude_indices:
+                        self._log("  > 发现的居中段落已被处理过，不再视为题目。")
+                        return [], []
                     self._log(f"  > 在块 {idx + 1} 发现潜在题目首行。")
                     first_title_idx = idx
                     break
+                if stop_at_body:
+                    self._log("  > 题目位置之前发现正文段落，视为无独立题目。")
+                    return [], []
         
         if first_title_idx == -1:
             self._log("  > 扫描结束，未能找到题目。")
@@ -1789,8 +1798,13 @@ class WordProcessor:
                 # 查找并格式化附件的标题和副标题
                 search_idx = block_idx + 1
                 
-                # 查找附件的标题和副标题
-                att_title_indices, att_subtitle_indices = self._find_title_and_subtitle_paragraphs(doc, is_from_txt, search_idx)
+                # 查找附件的标题和副标题：限定在附件标识之后紧邻的段落，
+                # 跳过已处理段落（如图表标题），避免把远处居中段误认成附件标题
+                att_title_indices, att_subtitle_indices = self._find_title_and_subtitle_paragraphs(
+                    doc, is_from_txt, search_idx,
+                    exclude_indices=processed_indices,
+                    stop_at_body=not is_from_txt,
+                )
                 
                 # 将附件的标题和副标题加入已处理集合
                 for idx in att_title_indices:

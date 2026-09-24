@@ -1026,7 +1026,14 @@ class WordFormatterGUI:
         self._update_listbox_placeholder()
 
     def add_files(self):
-        files = filedialog.askopenfilenames(filetypes=[("所有支持的文件", "*.docx;*.doc;*.wps;*.txt;*.md"), ("Word 文档", "*.docx;*.doc"), ("WPS 文档", "*.wps"), ("纯文本", "*.txt"), ("Markdown", "*.md")])
+        # pattern 列表用元组/空格分隔，分号分隔在非 Windows 平台会被当成单个 pattern
+        files = filedialog.askopenfilenames(filetypes=[
+            ("所有支持的文件", ("*.docx", "*.doc", "*.wps", "*.txt", "*.md")),
+            ("Word 文档", ("*.docx", "*.doc")),
+            ("WPS 文档", "*.wps"),
+            ("纯文本", "*.txt"),
+            ("Markdown", "*.md"),
+        ])
         if files:
             self._add_paths_to_listbox(files)
         
