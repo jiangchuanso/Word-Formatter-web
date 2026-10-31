@@ -314,6 +314,15 @@ function buildForm() {
     <label class="check" style="margin-top:8px"><input type="checkbox" data-key="normalize_punctuation" data-type="bool"> 启用符号标准化（实验功能，保守修复中英文标点混用）</label>
   </div>`);
 
+  // 增强选项（实验功能）
+  html.push(`<div class="section"><div class="sec-title">增强选项（实验功能）</div>
+    <div class="checkgroup">
+      <label class="check"><input type="checkbox" data-key="convert_floating_objects" data-type="bool"> 浮动对象转插入式（图片/嵌入对象/表格改为随文字排布）</label>
+      <label class="check"><input type="checkbox" data-key="media_single_line_spacing" data-type="bool"> 图片行改单倍行距（避免固定行距裁切图片）</label>
+      <label class="check"><input type="checkbox" data-key="normalize_heading_levels" data-type="bool"> 标题等级合并与防跳级（需勾选自动设置大纲级别）</label>
+    </div>
+  </div>`);
+
   $('#paramForm').innerHTML = html.join('');
   applyDefaults();
   loadSavedTemplateOnStart();

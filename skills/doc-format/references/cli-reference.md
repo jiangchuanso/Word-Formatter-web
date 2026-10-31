@@ -55,6 +55,12 @@ python scripts/wfp_cli.py test
 | `--english-font <字体>` | `Times New Roman` | 设置数字和字母字体；使用后自动启用 `use_custom_english_font` |
 | `--normalize-punctuation` | 关闭 | 启用符号标准化 |
 | `--disable-normalize-punctuation` | 关闭 | 关闭符号标准化 |
+| `--convert-floating-objects` | 关闭 | 浮动式图片/嵌入对象/表格改为插入式 |
+| `--disable-convert-floating-objects` | 关闭 | 关闭浮动对象转插入式 |
+| `--media-single-line-spacing` | 关闭 | 含图片/嵌入对象的段落改为单倍行距 |
+| `--disable-media-single-line-spacing` | 关闭 | 关闭图片行单倍行距 |
+| `--normalize-heading-levels` | 关闭 | 合并相同格式标题等级并补齐跳级 |
+| `--disable-normalize-heading-levels` | 关闭 | 关闭标题等级合并优化 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |
@@ -126,6 +132,9 @@ python scripts/wfp_cli.py format -i old.doc --soffice /Applications/LibreOffice.
 
 # 启用增强功能后处理
 python scripts/wfp_cli.py format -i input.docx --enable-table-formatting --english-font "Times New Roman" --normalize-punctuation
+
+# 浮动图片转插入式 + 图片行单倍行距 + 标题等级合并
+python scripts/wfp_cli.py format -i input.docx --convert-floating-objects --media-single-line-spacing --normalize-heading-levels
 
 # 查看和导出配置
 python scripts/wfp_cli.py show-config

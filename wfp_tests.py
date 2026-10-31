@@ -11,8 +11,9 @@ from unittest.mock import patch
 from pathlib import Path
 
 from docx import Document
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
+from docx.shared import Pt
 
 from wfp_config import DEFAULT_CONFIG
 from wfp_core import (
@@ -370,6 +371,289 @@ class EndToEndFormatTests(unittest.TestCase):
                     self.assertTrue(any(text.strip() for text in texts), f"empty output for {source.suffix}")
                 finally:
                     processor._cleanup_temp_files()
+
+
+FLOATING_DRAWING_XML = (
+    '<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+    '<wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" behindDoc="0" '
+    'locked="0" layoutInCell="1" allowOverlap="1">'
+    '<wp:simplePos x="0" y="0"/>'
+    '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>'
+    '<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>'
+    '<wp:extent cx="1905000" cy="1270000"/>'
+    '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+    '<wp:wrapSquare wrapText="bothSides"/>'
+    '<wp:docPr id="7" name="图片 7"/>'
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"/></a:graphic>'
+    '</wp:anchor></w:drawing>'
+)
+
+FLOATING_DRAWING_WITHOUT_ID_XML = (
+    '<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+    '<wp:anchor distT="0"><wp:docPr name="图片 8"/>'
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"/></a:graphic>'
+    '</wp:anchor></w:drawing>'
+)
+
+
+def _add_drawing(paragraph, xml=FLOATING_DRAWING_XML):
+    run = paragraph.add_run()
+    run._r.append(parse_xml(xml))
+    return run
+
+
+class FloatingObjectTests(unittest.TestCase):
+    def test_anchor_drawing_becomes_inline(self):
+        doc = Document()
+        para = doc.add_paragraph()
+        drawing = _add_drawing(para)._r[-1]
+
+        self.assertTrue(WordProcessor._anchor_to_inline(drawing, lambda: 99))
+
+        self.assertEqual([WordProcessor._local_tag(child.tag) for child in drawing], ['inline'])
+        inline = drawing[0]
+        self.assertEqual(
+            [WordProcessor._local_tag(child.tag) for child in inline],
+            ['extent', 'effectExtent', 'docPr', 'graphic'],
+        )
+        self.assertEqual(inline.get('distL'), '0')
+        self.assertEqual(inline.get('distR'), '0')
+        self.assertEqual(inline.find(qn('wp:extent')).get('cx'), '1905000')
+        self.assertEqual(inline.find(qn('wp:docPr')).get('id'), '7')
+        self.assertIsNone(inline.find(qn('wp:positionH')))
+        self.assertIsNone(inline.find(qn('wp:wrapSquare')))
+        self.assertIsNone(inline.find(qn('wp:simplePos')))
+
+    def test_missing_docpr_id_gets_unique_id(self):
+        doc = Document()
+        para = doc.add_paragraph()
+        drawing = _add_drawing(para, FLOATING_DRAWING_WITHOUT_ID_XML)._r[-1]
+
+        self.assertTrue(WordProcessor._anchor_to_inline(drawing, lambda: 99))
+
+        inline = drawing[0]
+        self.assertEqual(inline.find(qn('wp:docPr')).get('id'), '99')
+        self.assertEqual(inline.find(qn('wp:extent')).get('cx'), '0')
+
+    def test_inline_drawing_is_left_untouched(self):
+        doc = Document()
+        para = doc.add_paragraph()
+        inline_drawing = OxmlElement('w:drawing')
+        inline_drawing.append(OxmlElement('wp:inline'))
+        para.add_run()._r.append(inline_drawing)
+
+        self.assertFalse(WordProcessor._anchor_to_inline(inline_drawing, lambda: 1))
+        self.assertEqual(WordProcessor._local_tag(inline_drawing[0].tag), 'inline')
+
+    def test_vml_floating_shape_becomes_inline(self):
+        shape = OxmlElement('w:pict')
+        shape.set('style', 'width:200pt;height:150pt;position:absolute;left:0;z-index:2')
+
+        self.assertTrue(WordProcessor._vml_shape_to_inline(shape))
+        self.assertEqual(shape.get('style'), 'width:200pt;height:150pt')
+
+        inline_shape = OxmlElement('w:pict')
+        inline_shape.set('style', 'width:200pt;height:150pt')
+        self.assertFalse(WordProcessor._vml_shape_to_inline(inline_shape))
+        self.assertEqual(inline_shape.get('style'), 'width:200pt;height:150pt')
+
+    def test_floating_table_becomes_inline(self):
+        doc = Document()
+        table = doc.add_table(rows=1, cols=1)
+        tbl_pr = table._tbl.find(qn('w:tblPr'))
+        tbl_pr.append(OxmlElement('w:tblpPr'))
+        tbl_pr.append(OxmlElement('w:tblOverlap'))
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+
+        self.assertGreaterEqual(processor._convert_floating_to_inline(doc), 1)
+        tbl_pr = table._tbl.find(qn('w:tblPr'))
+        self.assertIsNone(tbl_pr.find(qn('w:tblpPr')))
+        self.assertIsNone(tbl_pr.find(qn('w:tblOverlap')))
+
+
+class MediaLineSpacingTests(unittest.TestCase):
+    def test_picture_paragraph_becomes_single_line_spacing(self):
+        doc = Document()
+        pic_para = doc.add_paragraph()
+        _add_drawing(pic_para)
+        body_para = doc.add_paragraph("正文内容")
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+        for para in (pic_para, body_para):
+            processor._apply_line_spacing(
+                para, 'line_spacing', 'line_spacing_unit', 'line_spacing_multiple', 28,
+            )
+
+        self.assertEqual(processor._apply_media_single_line_spacing(doc), 1)
+
+        pic_spacing = pic_para._p.get_or_add_pPr().get_or_add_spacing()
+        self.assertEqual(pic_spacing.get(qn('w:line')), '240')
+        self.assertEqual(pic_spacing.get(qn('w:lineRule')), 'auto')
+        body_spacing = body_para._p.get_or_add_pPr().get_or_add_spacing()
+        self.assertEqual(body_spacing.get(qn('w:line')), '560')
+        self.assertEqual(body_spacing.get(qn('w:lineRule')), 'exact')
+
+    def test_picture_inside_table_cell_is_covered(self):
+        doc = Document()
+        table = doc.add_table(rows=1, cols=1)
+        para = table.cell(0, 0).paragraphs[0]
+        _add_drawing(para)
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+        # 模拟表格排版把单元格写成了固定行距
+        processor._apply_line_spacing(
+            para, 'table_line_spacing', 'table_line_spacing_unit', 'table_line_spacing_multiple', 22,
+        )
+
+        self.assertEqual(processor._apply_media_single_line_spacing(doc), 1)
+
+        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        self.assertEqual(spacing.get(qn('w:line')), '240')
+        self.assertEqual(spacing.get(qn('w:lineRule')), 'auto')
+
+
+class HeadingLevelPlanTests(unittest.TestCase):
+    def test_numbered_heading_level_detection(self):
+        self.assertEqual(WordProcessor._numbered_heading_level('一、总体要求'), 1)
+        self.assertEqual(WordProcessor._numbered_heading_level('（一）工作要求'), 2)
+        self.assertEqual(WordProcessor._numbered_heading_level('1. 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
+        self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
+
+    def test_heading_text_heuristics(self):
+        self.assertTrue(WordProcessor._looks_like_heading_text('工作要求'))
+        self.assertFalse(WordProcessor._looks_like_heading_text('这是一段正文。'))
+        self.assertFalse(WordProcessor._looks_like_heading_text('很长的一段正文内容' * 20))
+
+    def test_format_signature_differs_by_font_and_bold(self):
+        doc = Document()
+        title = doc.add_paragraph("标题")
+        title_run = title.runs[0]
+        title_run.font.name = '黑体'
+        title_run.font.size = Pt(16)
+        title_run.font.bold = True
+        body = doc.add_paragraph("正文")
+        body_run = body.runs[0]
+        body_run.font.name = '仿宋'
+        body_run.font.size = Pt(16)
+
+        signature = WordProcessor._paragraph_format_signature(title)
+        self.assertIsNotNone(signature)
+        self.assertNotEqual(signature, WordProcessor._paragraph_format_signature(body))
+        self.assertEqual(signature, WordProcessor._paragraph_format_signature(title))
+        self.assertIsNone(WordProcessor._paragraph_format_signature(doc.add_paragraph()))
+
+    def test_same_format_paragraphs_join_anchor_level(self):
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 2, 'evidence': 2, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+            {'index': 2, 'signature': 'other', 'level': None, 'evidence': 0, 'joinable': True},
+            {'index': 3, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': False},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {1: 2})
+
+    def test_numbered_paragraph_keeps_its_own_level(self):
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 2,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': 3, 'evidence': 1,
+             'numbered_level': 3, 'joinable': True},
+            {'index': 2, 'signature': 'same', 'level': None, 'evidence': 0,
+             'numbered_level': None, 'joinable': True},
+        ]
+        plan = WordProcessor._plan_heading_levels(records)
+        self.assertEqual(plan, {2: 1})
+
+    def test_heading_style_sample_wins_over_unstyled_sample(self):
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 3, 'evidence': 2, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': 2, 'evidence': 3, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {0: 2})
+
+    def test_numbered_level_is_kept_when_group_level_differs(self):
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 2,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': 3, 'evidence': 1,
+             'numbered_level': 3, 'joinable': True},
+        ]
+        plan = WordProcessor._plan_heading_levels(records)
+        self.assertNotIn(1, plan, "自身带编号且与合并等级不同时应保留编号等级")
+
+    def test_majority_level_wins_within_same_evidence(self):
+        records = [
+            {'index': index, 'signature': 'same', 'level': level, 'evidence': 2, 'joinable': True}
+            for index, level in enumerate([3, 3, 2])
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {2: 3})
+
+    def test_group_without_level_anchor_is_ignored(self):
+        records = [
+            {'index': 0, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+            {'index': 1, 'signature': None, 'level': None, 'evidence': 0, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_level_compaction_only_fills_gaps(self):
+        self.assertEqual(WordProcessor._plan_level_compaction([1, 3]), {3: 2})
+        self.assertEqual(WordProcessor._plan_level_compaction([1, 2, 3]), {})
+        self.assertEqual(WordProcessor._plan_level_compaction([2, 3, 5]), {5: 4})
+        self.assertEqual(WordProcessor._plan_level_compaction([4]), {})
+        self.assertEqual(WordProcessor._plan_level_compaction([1, 3, 4, 6]), {3: 2, 4: 3, 6: 4})
+        self.assertEqual(WordProcessor._plan_level_compaction([]), {})
+
+
+class OptionalEnhancementIntegrationTests(unittest.TestCase):
+    def test_optional_enhancements_apply_to_docx(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_enhance_test_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、总体要求")
+            doc.add_paragraph("这是第一段正文内容。")
+            pic_para = doc.add_paragraph()
+            _add_drawing(pic_para)
+            doc.save(source)
+
+            config = DEFAULT_CONFIG.copy()
+            config.update({
+                'convert_floating_objects': True,
+                'media_single_line_spacing': True,
+                'normalize_heading_levels': True,
+            })
+            processor = WordProcessor(config)
+            output = root / "sample_formatted.docx"
+            try:
+                processor.format_document(str(source), str(output))
+            finally:
+                processor._cleanup_temp_files()
+
+            formatted = Document(output)
+            drawings = list(formatted.element.body.iter(qn('w:drawing')))
+            self.assertTrue(drawings, "浮动图片应保留在输出文档中")
+            for drawing in drawings:
+                self.assertEqual(
+                    [WordProcessor._local_tag(child.tag) for child in drawing], ['inline'],
+                )
+
+            pic_paragraphs = [
+                para for para in formatted.paragraphs
+                if WordProcessor._has_drawing_or_pict(para)
+            ]
+            self.assertTrue(pic_paragraphs)
+            for para in pic_paragraphs:
+                spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+                self.assertEqual(spacing.get(qn('w:line')), '240')
+                self.assertEqual(spacing.get(qn('w:lineRule')), 'auto')
+
+            heading = next(
+                para for para in formatted.paragraphs if para.text.strip().startswith('一、')
+            )
+            # w:outlineLvl 以 0 表示一级，日志与显示时 +1
+            self.assertEqual(processor._get_outline_level(heading), 0)
 
 
 def main(argv=None):

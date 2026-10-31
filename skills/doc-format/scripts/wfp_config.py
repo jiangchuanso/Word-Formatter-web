@@ -30,6 +30,10 @@ DEFAULT_CONFIG = {
     'set_outline': True, 'enable_attachment_formatting': True,
     'force_a4': False, 'use_custom_english_font': False, 'english_font': 'Times New Roman',
     'blank_line_mode': DEFAULT_BLANK_LINE_MODE, 'normalize_punctuation': False,
+    # 可选增强项，默认全部关闭，避免改变既有排版结果
+    'convert_floating_objects': False,  # 浮动式图片/嵌入对象/表格改为插入式
+    'media_single_line_spacing': False,  # 含图片或嵌入对象的段落改为单倍行距
+    'normalize_heading_levels': False,  # 合并相同格式标题等级并补齐跳级
     'enable_table_formatting': False, 'table_header_font': '仿宋_GB2312',
     'table_font': '仿宋_GB2312', 'table_size': 12, 'table_line_spacing': 22,
     'table_line_spacing_unit': 'pt', 'table_line_spacing_multiple': 1.0,

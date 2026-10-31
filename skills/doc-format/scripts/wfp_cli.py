@@ -103,6 +103,9 @@ CONFIG_DESCRIPTIONS = {
     "english_font": ("数字和字母字体", "默认 Times New Roman"),
     "blank_line_mode": ("TXT/MD 空行模式", "三选一：不改动、删除单空行、保留单空行"),
     "normalize_punctuation": ("符号标准化", "true/false，保守修复中英文标点混用"),
+    "convert_floating_objects": ("浮动对象转插入式", "true/false，浮动图片、嵌入对象和表格改为随文字排布"),
+    "media_single_line_spacing": ("图片行单倍行距", "true/false，含图片/嵌入对象的段落改为单倍行距"),
+    "normalize_heading_levels": ("标题等级合并优化", "true/false，同格式标题归并等级并补齐跳级，需开启 set_outline"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
     "table_header_font": ("表头字体", "enable_table_formatting 为 true 时生效"),
     "table_font": ("表格正文字体", "enable_table_formatting 为 true 时生效"),
@@ -234,6 +237,18 @@ def apply_convenience_overrides(config, args):
         config["use_custom_english_font"] = True
     if getattr(args, "disable_custom_english_font", False):
         config["use_custom_english_font"] = False
+    if getattr(args, "convert_floating_objects", False):
+        config["convert_floating_objects"] = True
+    if getattr(args, "disable_convert_floating_objects", False):
+        config["convert_floating_objects"] = False
+    if getattr(args, "media_single_line_spacing", False):
+        config["media_single_line_spacing"] = True
+    if getattr(args, "disable_media_single_line_spacing", False):
+        config["media_single_line_spacing"] = False
+    if getattr(args, "normalize_heading_levels", False):
+        config["normalize_heading_levels"] = True
+    if getattr(args, "disable_normalize_heading_levels", False):
+        config["normalize_heading_levels"] = False
     if getattr(args, "english_font", None):
         config["english_font"] = args.english_font
         config["use_custom_english_font"] = True
@@ -412,6 +427,9 @@ def show_config(args):
             "enable_table_formatting=true 启用表格内容自动调整",
             "use_custom_english_font=true 并设置 english_font，可单独指定数字和字母字体，默认 Times New Roman",
             "normalize_punctuation=true 启用符号标准化",
+            "convert_floating_objects=true 浮动式图片/嵌入对象/表格改为插入式",
+            "media_single_line_spacing=true 含图片/嵌入对象的段落改为单倍行距",
+            "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
         ],
         "config": {},
     }
@@ -462,6 +480,12 @@ def add_config_override_args(parser):
     parser.add_argument("--english-font", help="数字和字母字体；设置后会自动启用 use_custom_english_font")
     parser.add_argument("--normalize-punctuation", action="store_true", help="启用符号标准化")
     parser.add_argument("--disable-normalize-punctuation", action="store_true", help="关闭符号标准化")
+    parser.add_argument("--convert-floating-objects", action="store_true", help="浮动式图片/嵌入对象/表格改为插入式")
+    parser.add_argument("--disable-convert-floating-objects", action="store_true", help="关闭浮动对象转插入式")
+    parser.add_argument("--media-single-line-spacing", action="store_true", help="含图片/嵌入对象的段落改为单倍行距")
+    parser.add_argument("--disable-media-single-line-spacing", action="store_true", help="关闭图片行单倍行距")
+    parser.add_argument("--normalize-heading-levels", action="store_true", help="合并相同格式标题等级并补齐跳级")
+    parser.add_argument("--disable-normalize-heading-levels", action="store_true", help="关闭标题等级合并优化")
 
 
 def build_parser():

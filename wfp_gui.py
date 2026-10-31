@@ -150,6 +150,9 @@ class WordFormatterGUI:
         self.force_a4_var = tk.BooleanVar(value=self.default_params['force_a4'])
         self.use_custom_english_font_var = tk.BooleanVar(value=self.default_params['use_custom_english_font'])
         self.normalize_punctuation_var = tk.BooleanVar(value=self.default_params['normalize_punctuation'])
+        self.convert_floating_objects_var = tk.BooleanVar(value=self.default_params.get('convert_floating_objects', False))
+        self.media_single_line_spacing_var = tk.BooleanVar(value=self.default_params.get('media_single_line_spacing', False))
+        self.normalize_heading_levels_var = tk.BooleanVar(value=self.default_params.get('normalize_heading_levels', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
         self.enable_table_var = tk.BooleanVar(value=self.default_params['enable_table_formatting'])
         self.table_auto_col_width_var = tk.BooleanVar(value=self.default_params['table_auto_col_width'])
@@ -770,6 +773,24 @@ class WordFormatterGUI:
         row += 1
         blank_line_combo = create_combo(advanced_frame, "TXT/MD空行处理", 'blank_line_mode', BLANK_LINE_MODE_OPTIONS, row, 0, width=34)
         blank_line_combo.grid_configure(columnspan=3)
+        row += 1
+        enhance_help = (
+            "• 浮动对象转插入式：把浮动排版的图片、嵌入对象和表格改为随文字排布，便于统一排版。\n"
+            "• 图片行改单倍行距：含图片或嵌入对象的段落写为单倍行距，避免固定行距裁切对象（含表格内的图片）。\n"
+            "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。"
+        )
+        row = create_section_header(advanced_frame, "增强选项（实验功能）", enhance_help, row)
+        ttk.Checkbutton(
+            advanced_frame, text="浮动对象转插入式", variable=self.convert_floating_objects_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="图片行改单倍行距", variable=self.media_single_line_spacing_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="标题等级合并与防跳级", variable=self.normalize_heading_levels_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
 
         self._refresh_spacing_controls()
         self._refresh_indent_controls()
@@ -882,6 +903,9 @@ class WordFormatterGUI:
         self.force_a4_var.set(loaded_config.get('force_a4', False))
         self.use_custom_english_font_var.set(loaded_config.get('use_custom_english_font', False))
         self.normalize_punctuation_var.set(loaded_config.get('normalize_punctuation', False))
+        self.convert_floating_objects_var.set(loaded_config.get('convert_floating_objects', False))
+        self.media_single_line_spacing_var.set(loaded_config.get('media_single_line_spacing', False))
+        self.normalize_heading_levels_var.set(loaded_config.get('normalize_heading_levels', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
         self.enable_table_var.set(loaded_config.get('enable_table_formatting', False))
         self.table_auto_col_width_var.set(loaded_config.get('table_auto_col_width', True))
@@ -898,7 +922,8 @@ class WordFormatterGUI:
             'remove_blank_lines', 'normalize_punctuation',
             'enable_table_formatting', 'table_auto_col_width', 'table_header_bold',
             'table_smart_align', 'table_unified_borders',
-            'title_bold', 'h1_bold', 'h2_bold'
+            'title_bold', 'h1_bold', 'h2_bold',
+            'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -942,6 +967,9 @@ class WordFormatterGUI:
         config['force_a4'] = self.force_a4_var.get()
         config['use_custom_english_font'] = self.use_custom_english_font_var.get()
         config['normalize_punctuation'] = self.normalize_punctuation_var.get()
+        config['convert_floating_objects'] = self.convert_floating_objects_var.get()
+        config['media_single_line_spacing'] = self.media_single_line_spacing_var.get()
+        config['normalize_heading_levels'] = self.normalize_heading_levels_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
         config['enable_table_formatting'] = self.enable_table_var.get()
         config['table_auto_col_width'] = self.table_auto_col_width_var.get()

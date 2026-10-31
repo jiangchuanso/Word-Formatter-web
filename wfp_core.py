@@ -6,6 +6,8 @@ can reuse the same formatter implementation. This copy is maintained with the
 main release.
 """
 
+import copy
+import itertools
 import logging
 import os
 from pathlib import Path
@@ -86,6 +88,13 @@ RE_HEADING_H3 = re.compile(r'^\d+\s*[\.．]')
 RE_HEADING_H4 = re.compile(r'^[（\(]\d+[）\)]')
 RE_ATTACHMENT = re.compile(r'^附件\s*(\d+|[一二三四五六七八九十百千万零]+)?\s*[:：]?$')
 RE_H2_INLINE_TITLE = re.compile(r'^[（\(](.+?)[）\)](.*)', re.DOTALL)
+RE_HEADING_STYLE_NAME = re.compile(r'^(?:heading\s*\d+|标题\s*\d+)$', re.IGNORECASE)
+
+# 可选增强：大纲级别上限（w:outlineLvl 的 9 表示正文级，不做标题处理）
+MAX_HEADING_LEVEL = 9
+MAX_TITLE_OUTLINE_LEVEL = MAX_HEADING_LEVEL - 1
+HEADING_TEXT_MAX_LENGTH = 60
+HEADING_TAIL_PUNCTUATION = '。；，、：!！?？…'
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -617,15 +626,15 @@ class WordProcessor:
         result = cls._normalize_ellipsis(result)
         result = cls._normalize_quote_pairs(
             result,
-            {'"', '"', '"', '„', '‟', '「', '」'},
-            '"',
-            '"',
+            {'"', '“', '”', '„', '‟', '「', '」'},
+            '“',
+            '”',
         )
         result = cls._normalize_quote_pairs(
             result,
-            {"'", ''', ''', '‚', '‛'},
-            ''',
-            ''',
+            {"'", '‘', '’', '‚', '‛'},
+            '‘',
+            '’',
             skip_inner_latin=True,
         )
         result = cls._normalize_simple_punctuation(result)
@@ -1628,6 +1637,453 @@ class WordProcessor:
         
         return title_indices, subtitle_indices
 
+    # ------------------------------------------------------------------
+    # 可选增强一：浮动式图片 / 嵌入对象 / 表格 → 插入式
+    # ------------------------------------------------------------------
+    VML_SHAPE_TAGS = {
+        'arc', 'curve', 'group', 'image', 'line', 'oval', 'polyline',
+        'rect', 'roundrect', 'shape',
+    }
+    VML_FLOATING_PROPS = {
+        'position', 'z-index', 'left', 'top', 'margin-left', 'margin-top',
+        'mso-position-horizontal', 'mso-position-vertical',
+        'mso-position-horizontal-relative', 'mso-position-vertical-relative',
+        'mso-left-percent', 'mso-top-percent',
+    }
+
+    @staticmethod
+    def _local_tag(tag):
+        """返回不含命名空间的标签名。"""
+        if not isinstance(tag, str):
+            return ''
+        return tag.rsplit('}', 1)[-1] if '}' in tag else tag
+
+    @classmethod
+    def _vml_shape_to_inline(cls, shape):
+        """把 VML 浮动图形改为随文字排布。返回是否修改。"""
+        style = shape.get('style')
+        if not style:
+            return False
+        kept, floating = [], False
+        for declaration in style.split(';'):
+            piece = declaration.strip()
+            if not piece:
+                continue
+            prop = piece.split(':', 1)[0].strip().lower()
+            if prop == 'position':
+                if 'absolute' in piece.lower():
+                    floating = True
+                continue
+            if prop in cls.VML_FLOATING_PROPS:
+                floating = True
+                continue
+            kept.append(piece)
+        if not floating:
+            return False
+        shape.set('style', ';'.join(kept))
+        return True
+
+    @classmethod
+    def _graphic_extent(cls, graphic):
+        """缺 wp:extent 时，从 graphic 子树里取 cx/cy 作为兜底尺寸。"""
+        for node in graphic.iter():
+            if cls._local_tag(node.tag) != 'ext':
+                continue
+            cx, cy = node.get('cx'), node.get('cy')
+            if cx and cy:
+                return cx, cy
+        return '0', '0'
+
+    @classmethod
+    def _anchor_to_inline(cls, drawing, next_docpr_id):
+        """把 drawing 中的 wp:anchor 改写为 wp:inline。返回是否转换成功。"""
+        anchor = None
+        for child in drawing:
+            if cls._local_tag(child.tag) == 'anchor':
+                anchor = child
+                break
+        if anchor is None:
+            return False
+
+        parts = {}
+        for child in anchor:
+            parts.setdefault(cls._local_tag(child.tag), child)
+        graphic = parts.get('graphic')
+        if graphic is None:
+            return False
+
+        inline = OxmlElement('wp:inline')
+        for attr in ('distT', 'distB', 'distL', 'distR'):
+            inline.set(attr, '0')
+
+        if 'extent' in parts:
+            inline.append(copy.deepcopy(parts['extent']))
+        else:
+            extent = OxmlElement('wp:extent')
+            cx, cy = cls._graphic_extent(graphic)
+            extent.set('cx', cx)
+            extent.set('cy', cy)
+            inline.append(extent)
+
+        effect = parts.get('effectExtent')
+        if effect is not None:
+            inline.append(copy.deepcopy(effect))
+
+        doc_pr = copy.deepcopy(parts['docPr']) if 'docPr' in parts else OxmlElement('wp:docPr')
+        if not (doc_pr.get('id') or '').strip():
+            doc_pr.set('id', str(next_docpr_id()))
+        inline.append(doc_pr)
+
+        cnv = parts.get('cNvGraphicFramePr')
+        if cnv is not None:
+            inline.append(copy.deepcopy(cnv))
+        inline.append(copy.deepcopy(graphic))
+
+        drawing.remove(anchor)
+        drawing.append(inline)
+        return True
+
+    def _convert_floating_to_inline(self, doc):
+        """把浮动排版的图片、嵌入对象和表格转换为插入式。"""
+        start_id = 1
+        for node in doc.element.body.iter():
+            if self._local_tag(node.tag) == 'docPr':
+                try:
+                    start_id = max(start_id, int(node.get('id') or 0) + 1)
+                except ValueError:
+                    pass
+        id_source = itertools.count(start_id)
+
+        drawings = 0
+        for drawing in doc.element.body.iter(qn('w:drawing')):
+            if self._anchor_to_inline(drawing, lambda: next(id_source)):
+                drawings += 1
+
+        shapes = 0
+        for pict in doc.element.body.iter(qn('w:pict')):
+            for node in pict.iter():
+                if self._local_tag(node.tag) in self.VML_SHAPE_TAGS and self._vml_shape_to_inline(node):
+                    shapes += 1
+
+        tables = 0
+        for tbl in doc.element.body.iter(qn('w:tbl')):
+            tbl_pr = tbl.find(qn('w:tblPr'))
+            if tbl_pr is None:
+                continue
+            floating_pr = tbl_pr.find(qn('w:tblpPr'))
+            if floating_pr is not None:
+                tbl_pr.remove(floating_pr)
+                tables += 1
+            overlap = tbl_pr.find(qn('w:tblOverlap'))
+            if overlap is not None:
+                tbl_pr.remove(overlap)
+
+        self._log(
+            f"浮动对象转插入式：图片/嵌入对象 {drawings} 处，VML 图形 {shapes} 处，环绕表格 {tables} 个。"
+        )
+        return drawings + shapes + tables
+
+    # ------------------------------------------------------------------
+    # 可选增强二：含图片 / 嵌入对象的段落改为单倍行距
+    # ------------------------------------------------------------------
+    def _iter_document_paragraphs(self, doc):
+        """遍历正文与表格（含嵌套表格）中的所有段落。"""
+        def walk_cell(cell):
+            for para in cell.paragraphs:
+                yield para
+            for nested in cell.tables:
+                yield from walk_table(nested)
+
+        def walk_table(table):
+            for row in table.rows:
+                for cell in row.cells:
+                    yield from walk_cell(cell)
+
+        for para in doc.paragraphs:
+            yield para
+        for table in doc.tables:
+            yield from walk_table(table)
+
+    @staticmethod
+    def _force_single_line_spacing(para):
+        """写为单倍行距（w:line=240 / w:lineRule=auto）。返回是否发生变化。"""
+        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        changed = (
+            spacing.get(qn('w:line')) not in (None, '240')
+            or spacing.get(qn('w:lineRule')) not in (None, 'auto')
+        )
+        spacing.set(qn('w:line'), '240')
+        spacing.set(qn('w:lineRule'), 'auto')
+        return changed
+
+    def _apply_media_single_line_spacing(self, doc):
+        """含图片或嵌入对象的段落改为单倍行距，避免固定行距裁切对象。"""
+        changed = 0
+        for para in self._iter_document_paragraphs(doc):
+            if not (self._has_drawing_or_pict(para) or self._has_embedded_object(para)):
+                continue
+            if self._force_single_line_spacing(para):
+                changed += 1
+        self._log(f"图片/嵌入对象段落改为单倍行距：{changed} 个段落。")
+        return changed
+
+    # ------------------------------------------------------------------
+    # 可选增强三：相同格式标题等级合并 + 补齐跳级
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _flag_value(node):
+        """读取 w:b / w:i 之类的开关值，返回 True/False/None。"""
+        if node is None:
+            return None
+        raw = (node.get(qn('w:val')) or '').strip().lower()
+        return raw not in ('0', 'false', 'off')
+
+    @classmethod
+    def _get_style_outline_level(cls, style):
+        """读取段落样式的 outlineLvl（含 basedOn 链），返回 1-9 或 None。"""
+        seen = 0
+        while style is not None and seen < 6:
+            element = getattr(style, 'element', None)
+            if element is None:
+                return None
+            p_pr = element.find(qn('w:pPr'))
+            if p_pr is not None:
+                node = p_pr.find(qn('w:outlineLvl'))
+                value = node.get(qn('w:val')) if node is not None else None
+                if value is not None:
+                    try:
+                        level = int(value) + 1
+                    except ValueError:
+                        return None
+                    return level if 1 <= level <= MAX_TITLE_OUTLINE_LEVEL else None
+            style = getattr(style, 'base_style', None)
+            seen += 1
+        return None
+
+    @classmethod
+    def _get_heading_style_info(cls, para):
+        """返回 (是否标题样式或样式自带级别, 样式自带等级)。"""
+        try:
+            style = para.style
+        except Exception:
+            return False, None
+        if style is None:
+            return False, None
+        name = (getattr(style, 'name', '') or '').strip()
+        style_id = (getattr(style, 'style_id', '') or '').strip()
+        style_level = cls._get_style_outline_level(style)
+        has_heading_style = (
+            bool(RE_HEADING_STYLE_NAME.match(name))
+            or bool(RE_HEADING_STYLE_NAME.match(style_id))
+            or style_level is not None
+        )
+        return has_heading_style, style_level
+
+    @classmethod
+    def _paragraph_format_signature(cls, para):
+        """按字体、字号、加粗、斜体生成格式指纹（不含段落样式），信息不足返回 None。"""
+        r_pr = None
+        for run in para.runs:
+            if run.text.strip():
+                r_pr = run._r.find(qn('w:rPr'))
+                break
+        if r_pr is None:
+            p_pr = para._p.find(qn('w:pPr'))
+            if p_pr is not None:
+                r_pr = p_pr.find(qn('w:rPr'))
+        if r_pr is None:
+            return None
+
+        fonts = None
+        r_fonts = r_pr.find(qn('w:rFonts'))
+        if r_fonts is not None:
+            fonts = tuple(
+                r_fonts.get(qn(f'w:{attr}')) or '' for attr in ('ascii', 'eastAsia', 'hAnsi', 'cs')
+            )
+        size_node = r_pr.find(qn('w:sz')) if r_pr.find(qn('w:sz')) is not None else r_pr.find(qn('w:szCs'))
+        size = size_node.get(qn('w:val')) if size_node is not None else None
+        bold = cls._flag_value(r_pr.find(qn('w:b')))
+        italic = cls._flag_value(r_pr.find(qn('w:i')))
+        if fonts is None and size is None and bold is None and italic is None:
+            return None
+        return (fonts, size, bold, italic)
+
+    @classmethod
+    def _numbered_heading_level(cls, text):
+        """按编号特征推断的大纲级别，无法推断时返回 None。"""
+        value = (text or '').lstrip()
+        if RE_HEADING_H1.match(value):
+            return 1
+        if RE_HEADING_H2.match(value):
+            return 2
+        if RE_HEADING_H3.match(value):
+            return 3
+        if RE_HEADING_H4.match(value):
+            return 4
+        return None
+
+    @staticmethod
+    def _looks_like_heading_text(text):
+        """保守判断：短且不以句末标点结尾的段落，才参与无证据的同格式归并。"""
+        value = (text or '').strip()
+        if not value or len(value) > HEADING_TEXT_MAX_LENGTH:
+            return False
+        return value[-1] not in HEADING_TAIL_PUNCTUATION
+
+    @staticmethod
+    def _plan_heading_levels(records):
+        """
+        相同格式标题等级合并。每个 record 需包含：
+        index / signature / level / evidence / joinable / numbered_level。
+        证据优先级：3 有标题样式、2 有大纲级别、1 只有编号特征。
+        自身带编号且与合并等级不一致时保留编号等级（编号优先）。
+        返回 {record_index: 目标等级}，只包含需要改动的记录。
+        """
+        groups, order = {}, []
+        for record in records:
+            if not record.get('joinable') or record.get('signature') is None:
+                continue
+            key = record['signature']
+            group = groups.get(key)
+            if group is None:
+                group = groups[key] = {'members': [], 'counts': {}}
+                order.append(key)
+            group['members'].append(record)
+            if record.get('evidence', 0) > 0 and record.get('level'):
+                token = (record['evidence'], record['level'])
+                group['counts'][token] = group['counts'].get(token, 0) + 1
+
+        plan = {}
+        for key in order:
+            counts = groups[key]['counts']
+            if not counts:
+                continue
+            (_, level), _ = sorted(
+                counts.items(), key=lambda item: (-item[0][0], -item[1], item[0][1])
+            )[0]
+            for record in groups[key]['members']:
+                numbered_level = record.get('numbered_level')
+                if numbered_level and numbered_level != level:
+                    continue
+                if record.get('level') != level:
+                    plan[record['index']] = level
+        return plan
+
+    @staticmethod
+    def _plan_level_compaction(levels):
+        """补齐中间缺失的大纲级别（只补缺口，不整体上移）。返回 {旧级别: 新级别}。"""
+        mapping, expected = {}, None
+        for level in sorted(set(levels)):
+            if not 1 <= level <= MAX_TITLE_OUTLINE_LEVEL:
+                continue
+            mapping[level] = level if expected is None else expected
+            expected = mapping[level] + 1
+        return {old: new for old, new in mapping.items() if old != new}
+
+    def _effective_outline_level(self, para):
+        """读取段落当前生效的大纲级别（1-8）：先看直接设置，再看样式自带。"""
+        raw_level = self._get_outline_level(para)
+        if raw_level is not None:
+            level = raw_level + 1  # w:outlineLvl 以 0 表示一级
+            if 1 <= level <= MAX_TITLE_OUTLINE_LEVEL:
+                return level
+        _, style_level = self._get_heading_style_info(para)
+        return style_level
+
+    def _build_heading_records(self, doc, exclude_elements=None):
+        """收集参与同格式归并的段落记录，index 为记录在列表中的位置。"""
+        excluded = set(exclude_elements or ())
+        records = []
+        for para in doc.paragraphs:
+            if para._p in excluded:
+                continue
+            text = para.text.strip()
+            if not text:
+                continue
+            if self._has_drawing_or_pict(para) or self._has_embedded_object(para):
+                continue
+            signature = self._paragraph_format_signature(para)
+            if signature is None:
+                continue
+
+            has_heading_style, style_level = self._get_heading_style_info(para)
+            numbered = self._numbered_heading_level(text)
+            level = self._effective_outline_level(para) or numbered
+
+            if has_heading_style and level:
+                evidence = 3
+            elif level:
+                evidence = 2
+            elif numbered:
+                evidence = 1
+            else:
+                evidence = 0
+
+            records.append({
+                'index': len(records),
+                'paragraph': para,
+                'text': text,
+                'signature': signature,
+                'level': level,
+                'numbered_level': numbered,
+                'evidence': evidence,
+                'joinable': evidence > 0 or self._looks_like_heading_text(text),
+            })
+        return records
+
+    def _normalize_heading_levels(self, doc, exclude_elements=None):
+        """相同格式的段落并入同一标题等级，需要同时启用 set_outline。"""
+        records = self._build_heading_records(doc, exclude_elements)
+        plan = self._plan_heading_levels(records)
+        if not plan:
+            self._log("标题等级合并优化：未发现需要合并的相同格式标题。")
+            return 0
+
+        assigned = unified = 0
+        for position, level in sorted(plan.items()):
+            record = records[position]
+            old_level = self._effective_outline_level(record['paragraph'])
+            self._set_outline_level(record['paragraph'], level)
+            preview = record['text'][:30].replace("\n", " ")
+            if old_level is None:
+                assigned += 1
+                self._log(f"  > 相同格式补齐大纲级别 Lv{level}: \"{preview}...\"")
+            else:
+                unified += 1
+                self._log(f"  > 相同格式统一大纲级别 Lv{old_level} → Lv{level}: \"{preview}...\"")
+        self._log(f"标题等级合并优化完成：补齐 {assigned} 处，统一 {unified} 处。")
+        return len(plan)
+
+    def _compact_outline_levels(self, doc, exclude_elements=None):
+        """检查是否缺少中间的样式等级，有跳级时向上补齐。"""
+        excluded = set(exclude_elements or ())
+        targets = []
+        for para in doc.paragraphs:
+            if para._p in excluded:
+                continue
+            level = self._effective_outline_level(para)
+            if level is None:
+                continue
+            targets.append((para, level))
+
+        mapping = self._plan_level_compaction([level for _, level in targets])
+        if not mapping:
+            self._log("标题等级跳级检查：层级连续，无需调整。")
+            return 0
+
+        changed = 0
+        for para, level in targets:
+            new_level = mapping.get(level)
+            if new_level is None or new_level == level:
+                continue
+            self._set_outline_level(para, new_level)
+            changed += 1
+            preview = para.text.strip()[:30].replace("\n", " ")
+            self._log(f"  > 补齐跳级 Lv{level} → Lv{new_level}: \"{preview}...\"")
+        detail = "，".join(f"Lv{old}→Lv{new}" for old, new in sorted(mapping.items()))
+        self._log(f"标题等级跳级检查完成：{detail}，共调整 {changed} 处。")
+        return changed
+
     def format_document(self, input_path, output_path):
         processing_path, is_from_txt = self.convert_to_docx(input_path)
         processing_path = self._preprocess_document(processing_path, is_from_txt)
@@ -1638,11 +2094,15 @@ class WordProcessor:
             symbol_changes = self._normalize_document_symbols(doc)
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
         
+        apply_color = not is_from_txt
+
+        if self.config.get('convert_floating_objects', False):
+            self._log("正在把浮动式对象转换为插入式...")
+            self._convert_floating_to_inline(doc)
+
         all_blocks = list(self._iter_block_items(doc))
         processed_indices = set()
         
-        apply_color = not is_from_txt
-
         if not is_from_txt:
             self._log("正在扫描图表标题...")
             for idx, block in enumerate(all_blocks):
@@ -1681,11 +2141,25 @@ class WordProcessor:
         for idx in subtitle_indices:
             processed_indices.add(idx)
 
+        # 已处理段落不参与后续的大纲级别归纳
+        protected_paragraphs = [
+            all_blocks[idx]._p for idx in processed_indices
+            if isinstance(all_blocks[idx], Paragraph)
+        ]
+
         self._log("预扫描完成，开始逐段格式化...")
         if self.config['set_outline']:
             self._log("【大纲级别设置已启用】")
         else:
             self._log("【大纲级别设置已禁用】")
+
+        outline_enabled = self.config.get('set_outline', True)
+        if self.config.get('normalize_heading_levels', False):
+            if outline_enabled:
+                self._log("\n正在合并相同格式的标题等级...")
+                self._normalize_heading_levels(doc, exclude_elements=protected_paragraphs)
+            else:
+                self._log("\n【标题等级合并优化】需要先启用“自动设置大纲级别”，已跳过。")
             
         # 格式化主标题
         if title_indices:
@@ -2041,6 +2515,14 @@ class WordProcessor:
             block_idx += 1
         
         self._format_tables(doc, apply_color=apply_color)
+
+        if self.config.get('media_single_line_spacing', False):
+            self._apply_media_single_line_spacing(doc)
+
+        if self.config.get('normalize_heading_levels', False) and outline_enabled:
+            self._log("\n正在检查标题等级是否跳级...")
+            self._compact_outline_levels(doc, exclude_elements=protected_paragraphs)
+
         self._apply_page_setup(doc, is_from_txt=is_from_txt)
         self._log("正在保存最终文档...")
         doc.save(output_path)
