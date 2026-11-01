@@ -74,12 +74,13 @@ PRESET_GROUPS = {
     },
     'clean': {
         'label': '排版清洗',
-        'description': '符号标准化、断行合并、浮动对象、图片行距、标题等级',
+        'description': '符号标准化、断行合并、浮动对象、图片行距、章/节层级、标题等级',
         'values': {
             'normalize_punctuation': True,
             'merge_broken_lines': True,
             'convert_floating_objects': True,
             'media_single_line_spacing': True,
+            'detect_chapter_section': True,
             'normalize_heading_levels': True,
             'blank_line_mode': BLANK_LINE_MODE_DELETE_SINGLE,
         },

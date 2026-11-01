@@ -66,7 +66,7 @@ python scripts/wfp_cli.py test
 | `--merge-broken-lines` | 关闭 | 合并等长断行（还原 PDF 粘贴导致的段落断裂） |
 | `--disable-merge-broken-lines` | 关闭 | 关闭等长断行合并 |
 | `--preset format` | 无 | 快捷配置「公文格式排版」：页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别 |
-| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、标题等级合并 |
+| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节识别、标题等级合并 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |
