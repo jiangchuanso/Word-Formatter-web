@@ -106,6 +106,8 @@ CONFIG_DESCRIPTIONS = {
     "convert_floating_objects": ("浮动对象转插入式", "true/false，浮动图片、嵌入对象和表格改为随文字排布"),
     "media_single_line_spacing": ("图片行单倍行距", "true/false，含图片/嵌入对象的段落改为单倍行距"),
     "normalize_heading_levels": ("标题等级合并优化", "true/false，同格式标题归并等级并补齐跳级，需开启 set_outline"),
+    "detect_chapter_section": ("章/节层级识别", "true/false，第X章=1级、第X节=2级，其后编号标题整体顺延"),
+    "merge_broken_lines": ("等长断行合并", "true/false，把 PDF 粘贴造成的等长断行还原为整段"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
     "table_header_font": ("表头字体", "enable_table_formatting 为 true 时生效"),
     "table_font": ("表格正文字体", "enable_table_formatting 为 true 时生效"),
@@ -249,6 +251,14 @@ def apply_convenience_overrides(config, args):
         config["normalize_heading_levels"] = True
     if getattr(args, "disable_normalize_heading_levels", False):
         config["normalize_heading_levels"] = False
+    if getattr(args, "detect_chapter_section", False):
+        config["detect_chapter_section"] = True
+    if getattr(args, "disable_detect_chapter_section", False):
+        config["detect_chapter_section"] = False
+    if getattr(args, "merge_broken_lines", False):
+        config["merge_broken_lines"] = True
+    if getattr(args, "disable_merge_broken_lines", False):
+        config["merge_broken_lines"] = False
     if getattr(args, "english_font", None):
         config["english_font"] = args.english_font
         config["use_custom_english_font"] = True
@@ -430,6 +440,8 @@ def show_config(args):
             "convert_floating_objects=true 浮动式图片/嵌入对象/表格改为插入式",
             "media_single_line_spacing=true 含图片/嵌入对象的段落改为单倍行距",
             "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
+            "detect_chapter_section=true 第X章/第X节识别为 1/2 级标题，编号标题整体顺延",
+            "merge_broken_lines=true 合并等长断行，还原 PDF 粘贴导致的段落断裂",
         ],
         "config": {},
     }
@@ -486,6 +498,10 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-media-single-line-spacing", action="store_true", help="关闭图片行单倍行距")
     parser.add_argument("--normalize-heading-levels", action="store_true", help="合并相同格式标题等级并补齐跳级")
     parser.add_argument("--disable-normalize-heading-levels", action="store_true", help="关闭标题等级合并优化")
+    parser.add_argument("--detect-chapter-section", action="store_true", help="把第X章/第X节识别为 1/2 级标题，其后编号标题整体顺延")
+    parser.add_argument("--disable-detect-chapter-section", action="store_true", help="关闭章/节层级识别")
+    parser.add_argument("--merge-broken-lines", action="store_true", help="合并等长断行（还原 PDF 粘贴导致的段落断裂）")
+    parser.add_argument("--disable-merge-broken-lines", action="store_true", help="关闭等长断行合并")
 
 
 def build_parser():

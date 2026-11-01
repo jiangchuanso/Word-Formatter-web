@@ -153,6 +153,8 @@ class WordFormatterGUI:
         self.convert_floating_objects_var = tk.BooleanVar(value=self.default_params.get('convert_floating_objects', False))
         self.media_single_line_spacing_var = tk.BooleanVar(value=self.default_params.get('media_single_line_spacing', False))
         self.normalize_heading_levels_var = tk.BooleanVar(value=self.default_params.get('normalize_heading_levels', False))
+        self.detect_chapter_section_var = tk.BooleanVar(value=self.default_params.get('detect_chapter_section', False))
+        self.merge_broken_lines_var = tk.BooleanVar(value=self.default_params.get('merge_broken_lines', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
         self.enable_table_var = tk.BooleanVar(value=self.default_params['enable_table_formatting'])
         self.table_auto_col_width_var = tk.BooleanVar(value=self.default_params['table_auto_col_width'])
@@ -777,7 +779,9 @@ class WordFormatterGUI:
         enhance_help = (
             "• 浮动对象转插入式：把浮动排版的图片、嵌入对象和表格改为随文字排布，便于统一排版。\n"
             "• 图片行改单倍行距：含图片或嵌入对象的段落写为单倍行距，避免固定行距裁切对象（含表格内的图片）。\n"
-            "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。"
+            "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。\n"
+            "• 识别章/节层级：把“第X章”识别为 1 级、“第X节”识别为 2 级，“一、/（一）”等编号标题整体顺延。\n"
+            "• 合并等长断行：文档大量在同一位置断行（多为 PDF 粘贴）时，把断行还原为整段。"
         )
         row = create_section_header(advanced_frame, "增强选项（实验功能）", enhance_help, row)
         ttk.Checkbutton(
@@ -790,6 +794,13 @@ class WordFormatterGUI:
         ttk.Checkbutton(
             advanced_frame, text="标题等级合并与防跳级", variable=self.normalize_heading_levels_var,
         ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="识别章/节层级", variable=self.detect_chapter_section_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="合并等长断行", variable=self.merge_broken_lines_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
 
         self._refresh_spacing_controls()
@@ -906,6 +917,8 @@ class WordFormatterGUI:
         self.convert_floating_objects_var.set(loaded_config.get('convert_floating_objects', False))
         self.media_single_line_spacing_var.set(loaded_config.get('media_single_line_spacing', False))
         self.normalize_heading_levels_var.set(loaded_config.get('normalize_heading_levels', False))
+        self.detect_chapter_section_var.set(loaded_config.get('detect_chapter_section', False))
+        self.merge_broken_lines_var.set(loaded_config.get('merge_broken_lines', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
         self.enable_table_var.set(loaded_config.get('enable_table_formatting', False))
         self.table_auto_col_width_var.set(loaded_config.get('table_auto_col_width', True))
@@ -923,7 +936,8 @@ class WordFormatterGUI:
             'enable_table_formatting', 'table_auto_col_width', 'table_header_bold',
             'table_smart_align', 'table_unified_borders',
             'title_bold', 'h1_bold', 'h2_bold',
-            'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels'
+            'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels',
+            'detect_chapter_section', 'merge_broken_lines'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -970,6 +984,8 @@ class WordFormatterGUI:
         config['convert_floating_objects'] = self.convert_floating_objects_var.get()
         config['media_single_line_spacing'] = self.media_single_line_spacing_var.get()
         config['normalize_heading_levels'] = self.normalize_heading_levels_var.get()
+        config['detect_chapter_section'] = self.detect_chapter_section_var.get()
+        config['merge_broken_lines'] = self.merge_broken_lines_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
         config['enable_table_formatting'] = self.enable_table_var.get()
         config['table_auto_col_width'] = self.table_auto_col_width_var.get()

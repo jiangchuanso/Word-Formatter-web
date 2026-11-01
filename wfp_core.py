@@ -10,6 +10,7 @@ import copy
 import itertools
 import logging
 import os
+from collections import Counter
 from pathlib import Path
 import re
 import shutil
@@ -97,6 +98,17 @@ HEADING_TEXT_MAX_LENGTH = 60
 HEADING_TAIL_PUNCTUATION = '。；，、：!！?？…'
 # 句中一旦出现这些断句标点，说明该段在讲完整句子，属于正文而不是标题
 BODY_SENTENCE_PUNCTUATION = '。！？；!?'
+
+# 章/节标题（可选增强）：第X章 / ATAxx章 记为 1 级，第X节 记为 2 级，其后编号标题整体顺延
+RE_CHAPTER_TITLE = re.compile(
+    r'^(?:第\s*[一二三四五六七八九十百千万零〇\d]+\s*章|ATA\s*\d+\s*章)', re.IGNORECASE
+)
+RE_SECTION_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]+\s*节')
+
+# 等长断行合并（PDF 粘贴常见）：满行长度下限、同长度行出现次数下限、长度容差
+BROKEN_LINE_MIN_LENGTH = 15
+BROKEN_LINE_MIN_OCCURRENCES = 5
+BROKEN_LINE_LENGTH_TOLERANCE = 3
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -343,6 +355,8 @@ class WordProcessor:
     ):
         self.config = config
         self.temp_files = []
+        # 章/节识别开启时，编号标题（一、/（一）/1./（1））需要整体顺延的大纲级数
+        self._outline_offset = 0
         self.sys_temp_dir = tempfile.gettempdir()
         self.log_callback = log_callback
         self.com_manager = com_manager or WPSAppManager(log_callback)
@@ -1911,18 +1925,21 @@ class WordProcessor:
         return (fonts, size, bold, italic)
 
     @classmethod
-    def _numbered_heading_level(cls, text):
-        """按编号特征推断的大纲级别，无法推断时返回 None。"""
+    def _numbered_heading_level(cls, text, offset=0):
+        """按编号特征推断的大纲级别，无法推断时返回 None；offset 为章/节带来的顺延级数。"""
         value = (text or '').lstrip()
+        level = None
         if RE_HEADING_H1.match(value):
-            return 1
-        if RE_HEADING_H2.match(value):
-            return 2
-        if RE_HEADING_H3.match(value):
-            return 3
-        if RE_HEADING_H4.match(value):
-            return 4
-        return None
+            level = 1
+        elif RE_HEADING_H2.match(value):
+            level = 2
+        elif RE_HEADING_H3.match(value):
+            level = 3
+        elif RE_HEADING_H4.match(value):
+            level = 4
+        if level is None:
+            return None
+        return min(level + int(offset or 0), MAX_TITLE_OUTLINE_LEVEL)
 
     @staticmethod
     def _looks_like_heading_text(text):
@@ -1933,6 +1950,205 @@ class WordProcessor:
         if value[-1] in HEADING_TAIL_PUNCTUATION:
             return False
         return not any(punct in value for punct in BODY_SENTENCE_PUNCTUATION)
+
+    # ------------------------------------------------------------------
+    # 可选增强四：章/节层级识别
+    # ------------------------------------------------------------------
+    def _prepare_chapter_section_offset(self, doc):
+        """开启章/节识别时，按文档实际层级决定编号标题的顺延级数。
+
+        文档有“第X章” → 章=1、节=2，编号标题顺延 2 级；
+        只有“第X节” → 节=1，编号标题顺延 1 级；都没有则保持原有层级。
+        """
+        self._outline_offset = 0
+        if not self.config.get('detect_chapter_section', False):
+            return
+
+        has_chapter = has_section = False
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text or len(text) > HEADING_TEXT_MAX_LENGTH:
+                continue
+            if any(punct in text for punct in BODY_SENTENCE_PUNCTUATION):
+                continue
+            if RE_CHAPTER_TITLE.match(text):
+                has_chapter = True
+                break
+            if not has_section and RE_SECTION_TITLE.match(text):
+                has_section = True
+
+        self._outline_offset = 2 if has_chapter else (1 if has_section else 0)
+        if self._outline_offset:
+            kind = '章' if has_chapter else '节'
+            self._log(
+                f"检测到{kind}标题，章/节按 1/2 级处理，编号标题整体顺延 {self._outline_offset} 级。"
+            )
+        else:
+            self._log("未检测到“第X章/第X节”标题，章/节识别不生效。")
+
+    def _chapter_section_level(self, text):
+        """识别章/节标题并返回绝对大纲级别（1/2）；不适用时返回 None。"""
+        if not self._outline_offset:
+            return None
+        value = (text or '').strip()
+        if not value or len(value) > HEADING_TEXT_MAX_LENGTH:
+            return None
+        if any(punct in value for punct in BODY_SENTENCE_PUNCTUATION):
+            return None
+        if RE_CHAPTER_TITLE.match(value):
+            return 1
+        if RE_SECTION_TITLE.match(value):
+            return 2 if self._outline_offset >= 2 else 1
+        return None
+
+    def _heading_font_for_level(self, level):
+        """按最终大纲级别选择标题字体：1 级用一级标题字体、2 级用二级、其余按正文。"""
+        if level <= 1:
+            return (
+                self.config['h1_font'],
+                self.config['h1_size'],
+                self.config.get('h1_bold', False),
+            )
+        if level == 2:
+            return (
+                self.config['h2_font'],
+                self.config['h2_size'],
+                self.config.get('h2_bold', False),
+            )
+        return self.config['body_font'], self.config['body_size'], False
+
+    # ------------------------------------------------------------------
+    # 可选增强五：等长断行合并（PDF 粘贴还原）
+    # ------------------------------------------------------------------
+    def _is_heading_like_text(self, text):
+        """判断段落文字是否形似标题/附件标识，断行合并时必须跳过它们。"""
+        value = (text or '').strip()
+        if not value:
+            return False
+        return bool(
+            RE_HEADING_H1.match(value)
+            or RE_HEADING_H2.match(value)
+            or RE_HEADING_H3.match(value)
+            or RE_HEADING_H4.match(value)
+            or RE_CHAPTER_TITLE.match(value)
+            or RE_SECTION_TITLE.match(value)
+            or RE_ATTACHMENT.match(value)
+        )
+
+    @staticmethod
+    def _paragraph_is_plain_runs(para):
+        """段落内只有普通的 run（无超链接/域/内容控件），合并时才不会丢内容。"""
+        plain_tags = {
+            qn('w:pPr'), qn('w:r'), qn('w:bookmarkStart'), qn('w:bookmarkEnd'), qn('w:proofErr'),
+        }
+        return all(child.tag in plain_tags for child in para._p)
+
+    def _merge_broken_lines(self, doc):
+        """把等长的连续断行合并成整段，还原 PDF 粘贴丢失的段落流畅性。
+
+        判定思路：先统计文档中最常见的“满行”长度，只有当同一长度反复出现
+        （说明文档大量在固定宽度处断行）时，才把连续的满行 + 紧随的短末行
+        合并为一段。
+        """
+        entries = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if (
+                not text
+                or self._has_drawing_or_pict(para)
+                or self._has_embedded_object(para)
+                or self._is_heading_like_text(text)
+                or not self._paragraph_is_plain_runs(para)
+                or self._get_paragraph_alignment(para)
+                in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
+            ):
+                entries.append(None)
+                continue
+            entries.append((para, len(text)))
+
+        lengths = [entry[1] for entry in entries if entry and entry[1] >= BROKEN_LINE_MIN_LENGTH]
+        if not lengths:
+            self._log("  > 未发现可统计的断行，跳过等长断行合并。")
+            return 0
+
+        mode_length, mode_count = Counter(lengths).most_common(1)[0]
+        if mode_count < BROKEN_LINE_MIN_OCCURRENCES:
+            self._log(
+                f"  > 最常见的行长 {mode_length} 字只出现 {mode_count} 行，"
+                "不满足“大量等长断行”条件，跳过。"
+            )
+            return 0
+
+        def is_full(entry):
+            return (
+                entry is not None
+                and abs(entry[1] - mode_length) <= BROKEN_LINE_LENGTH_TOLERANCE
+            )
+
+        paragraphs = [entry[0] if entry is not None else None for entry in entries]
+        merged_paragraphs = merged_lines = 0
+        index, total = 0, len(entries)
+        while index < total:
+            if not is_full(entries[index]):
+                index += 1
+                continue
+
+            last_full = index
+            while last_full + 1 < total and is_full(entries[last_full + 1]):
+                last_full += 1
+            full_count = last_full - index + 1
+            end = last_full
+            # 自然段的最后一行通常不满行，跟在满行之后一并合并
+            if (
+                full_count >= 2
+                and last_full + 1 < total
+                and entries[last_full + 1] is not None
+                and not is_full(entries[last_full + 1])
+            ):
+                end = last_full + 1
+
+            if full_count >= 2:
+                preview = entries[index][0].text.strip()[:30].replace("\n", " ")
+                self._merge_paragraph_range(paragraphs, index, end)
+                merged_paragraphs += 1
+                merged_lines += end - index
+                self._log(
+                    f"  > 合并 {end - index + 1} 行为一段（主行长 {mode_length} 字）: \"{preview}...\""
+                )
+            index = end + 1
+
+        self._log(
+            f"等长断行合并完成：主行长 {mode_length} 字，合并 {merged_paragraphs} 段、"
+            f"消除 {merged_lines} 处断行。"
+        )
+        return merged_lines
+
+    @staticmethod
+    def _merge_paragraph_range(all_paragraphs, start, end):
+        """把 [start, end] 区间的段落内容合并进第一段，并删除其余段落。"""
+        if end <= start:
+            return
+        first = all_paragraphs[start]
+        first_p = first._p
+        for para in all_paragraphs[start + 1:end + 1]:
+            if para is None:
+                continue
+            runs = list(para.runs)
+            if first.runs:
+                first.runs[-1].text = first.runs[-1].text.rstrip()
+            if runs:
+                runs[0].text = runs[0].text.lstrip()
+            prev_text = ''.join(run.text for run in first.runs)
+            next_text = ''.join(run.text for run in runs)
+            if (
+                prev_text and next_text
+                and prev_text[-1].isascii() and prev_text[-1].isalnum()
+                and next_text[0].isascii() and next_text[0].isalnum()
+            ):
+                first.add_run(' ')
+            for run in runs:
+                first_p.append(run._r)
+            para._p.getparent().remove(para._p)
 
     @staticmethod
     def _pick_heading_group_level(counts):
@@ -2049,8 +2265,9 @@ class WordProcessor:
                 continue
 
             has_heading_style, style_level = self._get_heading_style_info(para)
-            numbered = self._numbered_heading_level(text)
+            numbered = self._numbered_heading_level(text, self._outline_offset)
             outline_level = self._effective_outline_level(para)
+            numbered = numbered or self._chapter_section_level(text)
             level = outline_level or numbered
 
             if has_heading_style and level:
@@ -2142,6 +2359,12 @@ class WordProcessor:
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
         
         apply_color = not is_from_txt
+
+        if self.config.get('merge_broken_lines', False):
+            self._log("正在合并等长断行（PDF 粘贴导致的换行）...")
+            self._merge_broken_lines(doc)
+
+        self._prepare_chapter_section_offset(doc)
 
         if self.config.get('convert_floating_objects', False):
             self._log("正在把浮动式对象转换为插入式...")
@@ -2315,6 +2538,7 @@ class WordProcessor:
             text_to_check_stripped = para.text.strip()
             leading_space_count = len(original_text) - len(text_to_check)
             para_text_preview = text_to_check[:30].replace("\n", " ")
+            chapter_level = self._chapter_section_level(text_to_check)
             
             spacing = para._p.get_or_add_pPr().get_or_add_spacing()
             spacing.set(qn('w:beforeAutospacing'), '0'); spacing.set(qn('w:afterAutospacing'), '0')
@@ -2433,17 +2657,32 @@ class WordProcessor:
                 block_idx = next_idx
                 continue
             
-            elif RE_HEADING_H1.match(text_to_check):
-                self._log(f"段落 {current_block_num}: 一级标题 - \"{para_text_preview}...\"")
+            elif chapter_level is not None:
+                kind = "章" if chapter_level == 1 else "节"
+                self._log(f"段落 {current_block_num}: {kind}标题（大纲 Lv{chapter_level}）- \"{para_text_preview}...\"")
                 self._strip_leading_whitespace(para)
-                self._format_heading(para, 1)
-                self._apply_font_to_runs(para, self.config['h1_font'], self.config['h1_size'], set_color=apply_color)
-                self._apply_bold_to_runs(para, self.config.get('h1_bold', False))
+                self._format_heading(para, chapter_level)
+                font, size, bold = self._heading_font_for_level(chapter_level)
+                self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                self._apply_bold_to_runs(para, bold)
+                self._apply_text_indent_and_align(para)
+                self._reset_pagination_properties(para)
+
+            elif RE_HEADING_H1.match(text_to_check):
+                level = 1 + self._outline_offset
+                font, size, bold = self._heading_font_for_level(level)
+                self._log(f"段落 {current_block_num}: 一级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                self._strip_leading_whitespace(para)
+                self._format_heading(para, level)
+                self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                self._apply_bold_to_runs(para, bold)
                 self._apply_text_indent_and_align(para)
                 self._reset_pagination_properties(para)
 
             elif RE_HEADING_H2.match(text_to_check):
-                self._log(f"段落 {current_block_num}: 二级标题 - \"{para_text_preview}...\"")
+                level = 2 + self._outline_offset
+                head_font, head_size, head_bold = self._heading_font_for_level(level)
+                self._log(f"段落 {current_block_num}: 二级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
                 self._strip_leading_whitespace(para)
                 
                 parts = para.text.split('。', 1)
@@ -2470,7 +2709,7 @@ class WordProcessor:
 
                         if run_end_pos <= title_len:
                             new_run = para.add_run(run_text)
-                            self._set_run_font(new_run, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
+                            self._set_run_font(new_run, head_font, head_size, set_color=apply_color)
                         
                         elif char_count >= title_len:
                             new_run = para.add_run(run_text)
@@ -2483,7 +2722,7 @@ class WordProcessor:
                             
                             if title_part:
                                 title_run = para.add_run(title_part)
-                                self._set_run_font(title_run, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
+                                self._set_run_font(title_run, head_font, head_size, set_color=apply_color)
                             if body_part:
                                 body_run = para.add_run(body_part)
                                 self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
@@ -2497,8 +2736,8 @@ class WordProcessor:
 
                         char_count = run_end_pos
 
-                    self._format_heading(para, 2)
-                    self._apply_bold_to_first_chars(para, title_len, self.config.get('h2_bold', False))
+                    self._format_heading(para, level)
+                    self._apply_bold_to_first_chars(para, title_len, head_bold)
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
 
@@ -2507,25 +2746,31 @@ class WordProcessor:
                     if match and not (text_to_check.startswith('（') and text_to_check.strip().endswith('）')):
                         self._log("  > 已将二级标题的括号统一为中文括号。")
                         for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
-                    self._format_heading(para, 2)
-                    self._apply_font_to_runs(para, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
-                    self._apply_bold_to_runs(para, self.config.get('h2_bold', False))
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, head_font, head_size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, head_bold)
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
                     
             elif RE_HEADING_H3.match(text_to_check):
-                self._log(f"段落 {current_block_num}: 三级标题 - \"{para_text_preview}...\"")
+                level = 3 + self._outline_offset
+                font, size, bold = self._heading_font_for_level(level)
+                self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
                 self._strip_leading_whitespace(para)
-                self._format_heading(para, 3)
-                self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+                self._format_heading(para, level)
+                self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                self._apply_bold_to_runs(para, bold)
                 self._apply_text_indent_and_align(para)
                 self._reset_pagination_properties(para)
                 
             elif RE_HEADING_H4.match(text_to_check):
-                self._log(f"段落 {current_block_num}: 四级标题 - \"{para_text_preview}...\"")
+                level = 4 + self._outline_offset
+                font, size, bold = self._heading_font_for_level(level)
+                self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
                 self._strip_leading_whitespace(para)
-                self._format_heading(para, 4)
-                self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+                self._format_heading(para, level)
+                self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                self._apply_bold_to_runs(para, bold)
                 self._apply_text_indent_and_align(para)
                 self._reset_pagination_properties(para)
                 

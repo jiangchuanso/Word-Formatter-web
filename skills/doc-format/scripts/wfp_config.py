@@ -34,6 +34,8 @@ DEFAULT_CONFIG = {
     'convert_floating_objects': False,  # 浮动式图片/嵌入对象/表格改为插入式
     'media_single_line_spacing': False,  # 含图片或嵌入对象的段落改为单倍行距
     'normalize_heading_levels': False,  # 合并相同格式标题等级并补齐跳级
+    'detect_chapter_section': False,  # 识别“第X章/第X节”为 1/2 级标题，其后编号标题整体顺延
+    'merge_broken_lines': False,  # 合并等长断行（PDF 粘贴导致的换行）
     'enable_table_formatting': False, 'table_header_font': '仿宋_GB2312',
     'table_font': '仿宋_GB2312', 'table_size': 12, 'table_line_spacing': 22,
     'table_line_spacing_unit': 'pt', 'table_line_spacing_multiple': 1.0,

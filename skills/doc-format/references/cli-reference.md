@@ -61,6 +61,10 @@ python scripts/wfp_cli.py test
 | `--disable-media-single-line-spacing` | 关闭 | 关闭图片行单倍行距 |
 | `--normalize-heading-levels` | 关闭 | 合并相同格式标题等级并补齐跳级 |
 | `--disable-normalize-heading-levels` | 关闭 | 关闭标题等级合并优化 |
+| `--detect-chapter-section` | 关闭 | 第X章/第X节识别为 1/2 级，编号标题整体顺延 |
+| `--disable-detect-chapter-section` | 关闭 | 关闭章/节层级识别 |
+| `--merge-broken-lines` | 关闭 | 合并等长断行（还原 PDF 粘贴导致的段落断裂） |
+| `--disable-merge-broken-lines` | 关闭 | 关闭等长断行合并 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |

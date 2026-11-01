@@ -522,10 +522,31 @@ class HeadingLevelPlanTests(unittest.TestCase):
         self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
         self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
 
+    def test_numbered_only_paragraph_is_weak_evidence(self):
+        """仅凭“一、”这类文本编号识别的段落，证据等级应为 1（弱），不能扩散到同格式正文。"""
+        doc = Document()
+        para = doc.add_paragraph('一、总体要求')
+        para.runs[0].font.size = Pt(16)
+
+        titled = doc.add_paragraph('总体要求')
+        titled.runs[0].font.size = Pt(16)
+        WordProcessor(DEFAULT_CONFIG.copy())._format_heading(titled, 2)
+
+        records = WordProcessor(DEFAULT_CONFIG.copy())._build_heading_records(doc)
+        by_text = {record['text']: record for record in records}
+        self.assertEqual(by_text['一、总体要求']['level'], 1)
+        self.assertEqual(by_text['一、总体要求']['evidence'], 1)
+        self.assertEqual(by_text['总体要求']['level'], 2)
+        self.assertEqual(by_text['总体要求']['evidence'], 2)
+
     def test_heading_text_heuristics(self):
         self.assertTrue(WordProcessor._looks_like_heading_text('工作要求'))
         self.assertFalse(WordProcessor._looks_like_heading_text('这是一段正文。'))
         self.assertFalse(WordProcessor._looks_like_heading_text('很长的一段正文内容' * 20))
+        self.assertFalse(
+            WordProcessor._looks_like_heading_text('动力元件；将机械能转换为压力能'),
+            '句中带断句标点的段落应按正文处理',
+        )
 
     def test_format_signature_differs_by_font_and_bold(self):
         doc = Document()
@@ -597,6 +618,43 @@ class HeadingLevelPlanTests(unittest.TestCase):
         ]
         self.assertEqual(WordProcessor._plan_heading_levels(records), {})
 
+    def test_numbered_anchor_does_not_promote_plain_paragraphs(self):
+        """只有“一、”这类编号证据时，同格式的其它段落不应被一并提成标题。"""
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 1,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0,
+             'numbered_level': None, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_body_dominant_group_is_not_filled(self):
+        """同格式段落以正文为主时，即使有标题样式证据也不整段补齐。"""
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 3, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+            {'index': 2, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_skip_callback_reports_plain_group_reason(self):
+        seen = []
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 1,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0,
+             'numbered_level': None, 'joinable': True},
+        ]
+        WordProcessor._plan_heading_levels(
+            records, on_skip=lambda reason, count: seen.append((reason, count))
+        )
+        self.assertEqual(seen, [('同类段落只有编号特征、缺少标题样式或大纲级别', 1)])
+
+    def test_numbered_level_shifts_with_chapter_offset(self):
+        self.assertEqual(WordProcessor._numbered_heading_level('一、概述', 2), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('（一）概述', 2), 4)
+        self.assertEqual(WordProcessor._numbered_heading_level('一、概述'), 1)
+
     def test_level_compaction_only_fills_gaps(self):
         self.assertEqual(WordProcessor._plan_level_compaction([1, 3]), {3: 2})
         self.assertEqual(WordProcessor._plan_level_compaction([1, 2, 3]), {})
@@ -654,6 +712,118 @@ class OptionalEnhancementIntegrationTests(unittest.TestCase):
             )
             # w:outlineLvl 以 0 表示一级，日志与显示时 +1
             self.assertEqual(processor._get_outline_level(heading), 0)
+
+
+class ChapterSectionDetectionTests(unittest.TestCase):
+    def _processor(self, enabled=True):
+        config = DEFAULT_CONFIG.copy()
+        config['detect_chapter_section'] = enabled
+        return WordProcessor(config)
+
+    def test_chapter_document_shifts_numbered_headings_by_two(self):
+        doc = Document()
+        doc.add_paragraph('ATA36章  引气系统')
+        doc.add_paragraph('第一节  概述')
+
+        processor = self._processor()
+        processor._prepare_chapter_section_offset(doc)
+        self.assertEqual(processor._outline_offset, 2)
+        self.assertEqual(processor._chapter_section_level('第3章  总则'), 1)
+        self.assertEqual(processor._chapter_section_level('第一节  概述'), 2)
+        self.assertIsNone(processor._chapter_section_level('一、概述'))
+
+    def test_section_only_document_shifts_by_one(self):
+        doc = Document()
+        doc.add_paragraph('第一节  概述')
+
+        processor = self._processor()
+        processor._prepare_chapter_section_offset(doc)
+        self.assertEqual(processor._outline_offset, 1)
+        self.assertEqual(processor._chapter_section_level('第一节  概述'), 1)
+
+    def test_disabled_option_keeps_original_levels(self):
+        doc = Document()
+        doc.add_paragraph('ATA36章  引气系统')
+
+        processor = self._processor(enabled=False)
+        processor._prepare_chapter_section_offset(doc)
+        self.assertEqual(processor._outline_offset, 0)
+        self.assertIsNone(processor._chapter_section_level('ATA36章  引气系统'))
+
+    def test_body_sentence_starting_with_chapter_word_is_not_heading(self):
+        processor = self._processor()
+        processor._outline_offset = 2
+        self.assertIsNone(processor._chapter_section_level('第三章介绍了液压系统的组成与工作原理。'))
+        self.assertIsNone(processor._chapter_section_level('第一节的内容详见下一章。'))
+
+
+class BrokenLineMergeTests(unittest.TestCase):
+    FULL_LINE = '发动机引气正常时从压气级第五级引出，高压九级接替供气'
+
+    def _build_broken_doc(self, path):
+        doc = Document()
+        doc.add_paragraph('标题一')
+        for _ in range(3):
+            for _ in range(3):
+                doc.add_paragraph(self.FULL_LINE)
+            doc.add_paragraph('末行。')
+        doc.save(path)
+
+    def _run(self, source, output, merge=True):
+        config = DEFAULT_CONFIG.copy()
+        config['merge_broken_lines'] = merge
+        processor = WordProcessor(config)
+        try:
+            processor.format_document(str(source), str(output))
+        finally:
+            processor._cleanup_temp_files()
+        return [para.text.strip() for para in Document(output).paragraphs if para.text.strip()]
+
+    def test_broken_lines_are_merged_into_paragraphs(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "broken.docx", root / "merged.docx"
+            self._build_broken_doc(source)
+
+            texts = self._run(source, output)
+            self.assertEqual(len(texts), 4, f"应还原为 4 段，实际 {len(texts)}: {texts}")
+            for text in texts[1:]:
+                self.assertEqual(text, self.FULL_LINE * 3 + '末行。')
+
+    def test_normal_document_is_left_alone(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "normal.docx", root / "normal_out.docx"
+            doc = Document()
+            paragraphs = [
+                '这是一段普通长度的正文内容，用来确认不会被误合并。',
+                '另一段长度与前面不同的正文。',
+                '第三段又换了一个长度，确保没有稳定的等长断行特征出现。',
+                '短句。',
+                '最后一段正文内容也保持原样。',
+            ]
+            for text in paragraphs:
+                doc.add_paragraph(text)
+            doc.save(source)
+
+            texts = self._run(source, output)
+            self.assertEqual(len(texts), len(paragraphs))
+
+    def test_heading_lines_stop_merging(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "mixed.docx", root / "mixed_out.docx"
+            doc = Document()
+            for _ in range(3):
+                doc.add_paragraph(self.FULL_LINE)
+            doc.add_paragraph('一、注意事项')
+            for _ in range(3):
+                doc.add_paragraph(self.FULL_LINE)
+            doc.save(source)
+
+            texts = self._run(source, output)
+            self.assertIn('一、注意事项', texts, f"标题行应保持独立: {texts}")
+            self.assertEqual(len([t for t in texts if self.FULL_LINE in t]), 2, f"实际: {texts}")
 
 
 def main(argv=None):
