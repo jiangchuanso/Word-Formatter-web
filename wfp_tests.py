@@ -15,7 +15,7 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
-from wfp_config import DEFAULT_CONFIG
+from wfp_config import DEFAULT_CONFIG, PRESET_GROUPS, apply_preset
 from wfp_core import (
     BLANK_LINE_MODE_DELETE_SINGLE,
     BLANK_LINE_MODE_KEEP_SINGLE,
@@ -712,6 +712,42 @@ class OptionalEnhancementIntegrationTests(unittest.TestCase):
             )
             # w:outlineLvl 以 0 表示一级，日志与显示时 +1
             self.assertEqual(processor._get_outline_level(heading), 0)
+
+
+class PresetGroupTests(unittest.TestCase):
+    def test_preset_groups_cover_format_and_clean(self):
+        self.assertEqual(set(PRESET_GROUPS), {'format', 'clean'})
+        for group in PRESET_GROUPS.values():
+            self.assertTrue(group['label'])
+            self.assertTrue(group['description'])
+            self.assertTrue(group['values'])
+
+    def test_preset_values_are_known_config_keys(self):
+        for name, group in PRESET_GROUPS.items():
+            for key, value in group['values'].items():
+                self.assertIn(key, DEFAULT_CONFIG, f"{name} 组引用了未知配置项 {key}")
+                self.assertEqual(
+                    type(value), type(DEFAULT_CONFIG[key]),
+                    f"{name}.{key} 的类型与默认配置不一致",
+                )
+
+    def test_apply_preset_merges_without_mutating_source(self):
+        base = dict(DEFAULT_CONFIG)
+        merged = apply_preset(base, 'clean')
+        self.assertTrue(merged['merge_broken_lines'])
+        self.assertTrue(merged['normalize_punctuation'])
+        self.assertFalse(base['merge_broken_lines'], '原字典不应被修改')
+        with self.assertRaises(KeyError):
+            apply_preset(base, 'unknown')
+
+    def test_format_preset_enables_official_layout(self):
+        merged = apply_preset(dict(DEFAULT_CONFIG), 'format')
+        self.assertTrue(merged['force_a4'])
+        self.assertTrue(merged['set_outline'])
+        self.assertTrue(merged['enable_attachment_formatting'])
+        self.assertTrue(merged['detect_chapter_section'])
+        self.assertEqual(merged['body_font'], '仿宋_GB2312')
+        self.assertEqual(merged['title_size'], 22)
 
 
 class ChapterSectionDetectionTests(unittest.TestCase):

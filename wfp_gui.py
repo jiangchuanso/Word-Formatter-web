@@ -89,7 +89,7 @@ except Exception:
     TkinterDnD = None
     TKDND_AVAILABLE = False
 
-from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_FONT_OPTIONS
+from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_FONT_OPTIONS, PRESET_GROUPS
 from wfp_core import (
     BLANK_LINE_MODE_DELETE_SINGLE,
     BLANK_LINE_MODE_KEEP_SINGLE,
@@ -812,6 +812,12 @@ class WordFormatterGUI:
         ttk.Button(config_buttons, text="保存配置", command=self.save_config).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="保存为默认", command=self.save_default_config).grid(row=1, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="恢复内置默认", command=self.load_defaults).grid(row=1, column=1, sticky='ew', padx=2, pady=2)
+        ttk.Button(
+            config_buttons, text="公文格式排版", command=lambda: self.apply_preset('format'),
+        ).grid(row=2, column=0, sticky='ew', padx=2, pady=2)
+        ttk.Button(
+            config_buttons, text="排版清洗", command=lambda: self.apply_preset('clean'),
+        ).grid(row=2, column=1, sticky='ew', padx=2, pady=2)
         config_buttons.columnconfigure(0, weight=1)
         config_buttons.columnconfigure(1, weight=1)
         config_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -953,6 +959,16 @@ class WordFormatterGUI:
 
     def load_defaults(self):
         self._apply_config(self.default_params)
+
+    def apply_preset(self, name):
+        """套用「公文格式排版 / 排版清洗」快捷配置。"""
+        preset = PRESET_GROUPS.get(name)
+        if not preset:
+            return
+        config = self.collect_config()
+        config.update(preset['values'])
+        self._apply_config(config)
+        messagebox.showinfo("快捷配置", f"已套用「{preset['label']}」推荐配置：\n{preset['description']}")
     
     def collect_config(self):
         config = {}

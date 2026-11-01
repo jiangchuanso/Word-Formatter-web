@@ -89,6 +89,19 @@
   .toast.show { opacity: .95; }
   .footnote { font-size: 12px; color: var(--muted); margin-top: 10px; }
   details summary { cursor: pointer; }
+  .cat-title { margin: 20px 0 10px; font-size: 13px; font-weight: 700; color: var(--primary-dark);
+    border-bottom: 1px dashed var(--border); padding-bottom: 6px; letter-spacing: .5px; }
+  .cat-title:first-child { margin-top: 0; }
+  .preset-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .preset { flex: 1 1 210px; text-align: left; padding: 10px 14px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; cursor: pointer; display: flex; flex-direction: column;
+    gap: 2px; font-family: inherit; transition: .15s; }
+  .preset:hover { border-color: var(--primary); }
+  .preset.active { border-color: var(--primary); background: #eef6f1;
+    box-shadow: inset 0 0 0 1px var(--primary); }
+  .preset-name { font-size: 14px; font-weight: 700; color: var(--text); }
+  .preset.active .preset-name { color: var(--primary-dark); }
+  .preset-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -152,6 +165,7 @@
       <h2>使用说明</h2>
       <ul style="font-size:13px;color:var(--muted);line-height:1.7;padding-left:18px;margin:0">
         <li><b>智能识别</b>：自动识别主/副标题、一~四级层级标题、图/表标题、附件等。</li>
+        <li><b>快捷配置</b>：参数区顶部「公文格式排版 / 排版清洗」可一键套用该类别推荐配置。</li>
         <li><b>原始文件安全</b>：所有操作在服务器端临时副本上进行，<b>不会修改</b>你的源文件。</li>
         <li><b>旧格式</b>：.doc/.wps 由服务器端 Office/WPS（Windows）或 LibreOffice（Linux/macOS）转换。</li>
         <li><b>批量</b>：上传多个文件，逐一处理并返回各自下载链接。</li>
@@ -218,6 +232,20 @@ function fontOptions(group) {
 function buildForm() {
   const d = SCHEMA.default_config;
   const html = [];
+
+  // 快捷配置：按「公文格式排版 / 排版清洗」两类功能一键套用
+  html.push(`<div class="section"><div class="sec-title">快捷配置 <span class="help" title="把参数按功能分成两类：公文格式排版与排版清洗。点击卡片即时套用该类别推荐值，再次点击恢复内置默认。">(?)</span></div>
+    <div class="preset-row">
+      ${Object.entries(SCHEMA.preset_groups || {}).map(([key, g]) => `
+        <button type="button" class="preset" data-preset="${key}">
+          <span class="preset-name">${escapeHtml(g.label)}</span>
+          <span class="preset-desc">${escapeHtml(g.description)}</span>
+        </button>`).join('')}
+    </div>
+    <div class="footnote">两个开关可同时启用：先「排版清洗」还原文档结构，再「公文格式排版」套用公文体例。</div>
+  </div>`);
+
+  html.push(`<div class="cat-title">公文格式排版</div>`);
 
   // 页面设置
   html.push(`<div class="section"><div class="sec-title">页面设置 <span class="help" title="上/下/左/右边距、页脚距、A4 强制、页码对齐/字体/字号">(?)</span></div>
@@ -311,23 +339,55 @@ function buildForm() {
     <label class="field" style="margin-top:8px">TXT/MD 空行处理
       <select data-key="blank_line_mode" data-type="select">${SCHEMA.blank_line_mode_options.map(o=>`<option value="${o}">${o}</option>`).join('')}</select>
     </label>
-    <label class="check" style="margin-top:8px"><input type="checkbox" data-key="normalize_punctuation" data-type="bool"> 启用符号标准化（实验功能，保守修复中英文标点混用）</label>
   </div>`);
 
-  // 增强选项（实验功能）
-  html.push(`<div class="section"><div class="sec-title">增强选项（实验功能）</div>
+  // 排版清洗（实验功能）
+  html.push(`<div class="cat-title">排版清洗</div>`);
+  html.push(`<div class="section"><div class="sec-title">增强选项（实验功能） <span class="help" title="这些开关用于清洗源文档：修复标点、还原 PDF 断行、处理浮动对象与图片行距、合并标题等级。">(?)</span></div>
     <div class="checkgroup">
+      <label class="check"><input type="checkbox" data-key="normalize_punctuation" data-type="bool"> 符号标准化（保守修复中英文标点混用）</label>
+      <label class="check"><input type="checkbox" data-key="merge_broken_lines" data-type="bool"> 合并等长断行（还原 PDF 粘贴导致的段落断裂）</label>
       <label class="check"><input type="checkbox" data-key="convert_floating_objects" data-type="bool"> 浮动对象转插入式（图片/嵌入对象/表格改为随文字排布）</label>
       <label class="check"><input type="checkbox" data-key="media_single_line_spacing" data-type="bool"> 图片行改单倍行距（避免固定行距裁切图片）</label>
       <label class="check"><input type="checkbox" data-key="normalize_heading_levels" data-type="bool"> 标题等级合并与防跳级（需勾选自动设置大纲级别）</label>
       <label class="check"><input type="checkbox" data-key="detect_chapter_section" data-type="bool"> 识别章/节层级（第X章=1级、第X节=2级，其后编号标题整体顺延）</label>
-      <label class="check"><input type="checkbox" data-key="merge_broken_lines" data-type="bool"> 合并等长断行（还原 PDF 粘贴导致的段落断裂）</label>
     </div>
   </div>`);
 
   $('#paramForm').innerHTML = html.join('');
+  bindPresetButtons();
   applyDefaults();
   loadSavedTemplateOnStart();
+}
+
+// ---------- 快捷配置开关（公文格式排版 / 排版清洗） ----------
+function bindPresetButtons() {
+  document.querySelectorAll('.preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.preset;
+      const group = (SCHEMA.preset_groups || {})[key];
+      if (!group) return;
+      const turningOn = !btn.classList.contains('active');
+      if (turningOn) {
+        applyConfig(group.values);
+        toast(`已套用「${group.label}」推荐配置`);
+      } else {
+        restoreDefaults(Object.keys(group.values));
+        toast(`已还原「${group.label}」为内置默认`);
+      }
+      btn.classList.toggle('active', turningOn);
+    });
+  });
+}
+
+function restoreDefaults(keys) {
+  const back = {};
+  keys.forEach(k => { back[k] = SCHEMA.default_config[k]; });
+  applyConfig(back);
+}
+
+function clearPresetState() {
+  document.querySelectorAll('.preset').forEach(btn => btn.classList.remove('active'));
 }
 
 // 按磅值找字号显示文案；无精确匹配时取最接近的文案，避免下拉框显示空白
@@ -493,7 +553,11 @@ function switchMode(m) {
   $('#textPanel').style.display = m === 'text' ? '' : 'none';
 }
 
-$('#resetBtn').addEventListener('click', () => { applyDefaults(); toast('已恢复内置默认参数'); });
+$('#resetBtn').addEventListener('click', () => {
+  applyDefaults();
+  clearPresetState();
+  toast('已恢复内置默认参数');
+});
 
 // ---------- 执行排版 ----------
 $('#runBtn').addEventListener('click', run);

@@ -27,7 +27,12 @@ from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_FONT_OPTIONS  # noqa: E402
+from wfp_config import (  # noqa: E402
+    DEFAULT_CONFIG,
+    FONT_SIZE_MAP,
+    PRESET_FONT_OPTIONS,
+    PRESET_GROUPS,
+)
 from wfp_core import (  # noqa: E402
     BLANK_LINE_MODE_OPTIONS,
     LegacyConversionUnavailable,
@@ -89,6 +94,7 @@ def build_frontend_schema():
         "font_size_map": FONT_SIZE_MAP,                     # 显示文案 -> 浮点磅值
         "font_size_keys": list(FONT_SIZE_MAP.keys()),
         "preset_font_options": PRESET_FONT_OPTIONS,          # 各分组预设字体列表
+        "preset_groups": PRESET_GROUPS,                      # 快捷配置：公文格式排版 / 排版清洗
         "default_config": DEFAULT_CONFIG,
         "blank_line_mode_options": BLANK_LINE_MODE_OPTIONS,
         "supported_extensions": list(SUPPORTED_FILE_EXTENSIONS),

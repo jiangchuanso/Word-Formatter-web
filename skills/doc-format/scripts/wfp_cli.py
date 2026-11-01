@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP
+from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_GROUPS, apply_preset
 from wfp_core import (
     BLANK_LINE_MODE_OPTIONS,
     LegacyConversionUnavailable,
@@ -272,6 +272,10 @@ def apply_convenience_overrides(config, args):
 
 def load_config_with_overrides(args):
     config, source = load_config(getattr(args, "config", None), getattr(args, "config_json", None))
+    preset_name = getattr(args, "preset", None)
+    if preset_name:
+        config = apply_preset(config, preset_name)
+        source += f" + 快捷配置:{PRESET_GROUPS[preset_name]['label']}"
     apply_set_overrides(config, getattr(args, "set", None))
     apply_convenience_overrides(config, args)
     return normalize_config(config), source
@@ -432,6 +436,11 @@ def show_config(args):
         "legacy_conversion": ".doc/.wps 在 Windows 优先使用 WPS/Word COM；macOS/Kylin/Linux 或 COM 失败时尝试 LibreOffice soffice；macOS/Kylin/Linux 未安装 LibreOffice 时会跳过旧格式文件。",
         "font_size_names": {str(key): value for key, value in FONT_SIZE_NAMES.items()},
         "blank_line_modes": BLANK_LINE_MODE_OPTIONS,
+        "preset_groups": {
+            key: {"label": group["label"], "description": group["description"],
+                  "values": group["values"]}
+            for key, group in PRESET_GROUPS.items()
+        },
         "optional_features": [
             "convert_auto_numbering=true 非 Windows 识别自动编号并转换为文字（默认开启，含表格；不支持的编号保留并记录警告）",
             "enable_table_formatting=true 启用表格内容自动调整",
@@ -502,6 +511,10 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-detect-chapter-section", action="store_true", help="关闭章/节层级识别")
     parser.add_argument("--merge-broken-lines", action="store_true", help="合并等长断行（还原 PDF 粘贴导致的段落断裂）")
     parser.add_argument("--disable-merge-broken-lines", action="store_true", help="关闭等长断行合并")
+    parser.add_argument(
+        "--preset", choices=sorted(PRESET_GROUPS),
+        help="快捷配置组：format=公文格式排版，clean=排版清洗（在 --set 之前生效，可被后续参数覆盖）",
+    )
 
 
 def build_parser():
