@@ -95,6 +95,8 @@ MAX_HEADING_LEVEL = 9
 MAX_TITLE_OUTLINE_LEVEL = MAX_HEADING_LEVEL - 1
 HEADING_TEXT_MAX_LENGTH = 60
 HEADING_TAIL_PUNCTUATION = '。；，、：!！?？…'
+# 句中一旦出现这些断句标点，说明该段在讲完整句子，属于正文而不是标题
+BODY_SENTENCE_PUNCTUATION = '。！？；!?'
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -1924,19 +1926,36 @@ class WordProcessor:
 
     @staticmethod
     def _looks_like_heading_text(text):
-        """保守判断：短且不以句末标点结尾的段落，才参与无证据的同格式归并。"""
+        """保守判断：短、句末与句中都没有断句标点的段落，才参与无证据的同格式归并。"""
         value = (text or '').strip()
         if not value or len(value) > HEADING_TEXT_MAX_LENGTH:
             return False
-        return value[-1] not in HEADING_TAIL_PUNCTUATION
+        if value[-1] in HEADING_TAIL_PUNCTUATION:
+            return False
+        return not any(punct in value for punct in BODY_SENTENCE_PUNCTUATION)
 
     @staticmethod
-    def _plan_heading_levels(records):
+    def _pick_heading_group_level(counts):
+        """从 {(证据等级, 大纲级别): 次数} 计数中选出组内最具代表性的级别。"""
+        if not counts:
+            return None
+        (_, level), _ = sorted(
+            counts.items(), key=lambda item: (-item[0][0], -item[1], item[0][1])
+        )[0]
+        return level
+
+    @staticmethod
+    def _plan_heading_levels(records, on_skip=None):
         """
         相同格式标题等级合并。每个 record 需包含：
         index / signature / level / evidence / joinable / numbered_level。
         证据优先级：3 有标题样式、2 有大纲级别、1 只有编号特征。
         自身带编号且与合并等级不一致时保留编号等级（编号优先）。
+
+        无证据的段落只在同时满足以下两点时才跟着补齐，避免正文被整段提成标题：
+        1) 同格式组内存在强证据（标题样式或已有大纲级别）；
+           仅凭“一、”这类文本编号推断出的证据不足以扩散到其它段落；
+        2) 有证据的段落不少于无证据的段落，即该格式没有被正文大量占用。
         返回 {record_index: 目标等级}，只包含需要改动的记录。
         """
         groups, order = {}, []
@@ -1946,25 +1965,48 @@ class WordProcessor:
             key = record['signature']
             group = groups.get(key)
             if group is None:
-                group = groups[key] = {'members': [], 'counts': {}}
+                group = groups[key] = {
+                    'members': [], 'strong': {}, 'weak': {}, 'plain': 0,
+                }
                 order.append(key)
             group['members'].append(record)
-            if record.get('evidence', 0) > 0 and record.get('level'):
-                token = (record['evidence'], record['level'])
-                group['counts'][token] = group['counts'].get(token, 0) + 1
+            evidence = record.get('evidence', 0)
+            if evidence > 0 and record.get('level'):
+                bucket = group['strong'] if evidence >= 2 else group['weak']
+                token = (evidence, record['level'])
+                bucket[token] = bucket.get(token, 0) + 1
+            else:
+                group['plain'] += 1
 
         plan = {}
         for key in order:
-            counts = groups[key]['counts']
-            if not counts:
-                continue
-            (_, level), _ = sorted(
-                counts.items(), key=lambda item: (-item[0][0], -item[1], item[0][1])
-            )[0]
-            for record in groups[key]['members']:
+            group = groups[key]
+            strong_level = WordProcessor._pick_heading_group_level(group['strong'])
+            weak_level = WordProcessor._pick_heading_group_level(group['weak'])
+            evidenced = len(group['members']) - group['plain']
+            fill_allowed = strong_level is not None and group['plain'] <= evidenced
+            fill_level = strong_level if fill_allowed else None
+
+            if group['plain'] and not fill_allowed and on_skip is not None:
+                reason = (
+                    '同类段落只有编号特征、缺少标题样式或大纲级别'
+                    if strong_level is None
+                    else '同类段落多为无标题证据的正文'
+                )
+                on_skip(reason, group['plain'])
+
+            for record in group['members']:
                 numbered_level = record.get('numbered_level')
-                if numbered_level and numbered_level != level:
-                    continue
+                if record.get('evidence', 0) > 0:
+                    level = strong_level or weak_level
+                    if level is None:
+                        continue
+                    if numbered_level and numbered_level != level:
+                        continue
+                else:
+                    level = fill_level
+                    if level is None:
+                        continue
                 if record.get('level') != level:
                     plan[record['index']] = level
         return plan
@@ -2008,11 +2050,12 @@ class WordProcessor:
 
             has_heading_style, style_level = self._get_heading_style_info(para)
             numbered = self._numbered_heading_level(text)
-            level = self._effective_outline_level(para) or numbered
+            outline_level = self._effective_outline_level(para)
+            level = outline_level or numbered
 
             if has_heading_style and level:
                 evidence = 3
-            elif level:
+            elif outline_level:
                 evidence = 2
             elif numbered:
                 evidence = 1
@@ -2034,7 +2077,11 @@ class WordProcessor:
     def _normalize_heading_levels(self, doc, exclude_elements=None):
         """相同格式的段落并入同一标题等级，需要同时启用 set_outline。"""
         records = self._build_heading_records(doc, exclude_elements)
-        plan = self._plan_heading_levels(records)
+
+        def _report_skip(reason, count):
+            self._log(f"  > 跳过 {count} 个同格式段落：{reason}，按正文保留。")
+
+        plan = self._plan_heading_levels(records, on_skip=_report_skip)
         if not plan:
             self._log("标题等级合并优化：未发现需要合并的相同格式标题。")
             return 0

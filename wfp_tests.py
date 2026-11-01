@@ -522,10 +522,31 @@ class HeadingLevelPlanTests(unittest.TestCase):
         self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
         self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
 
+    def test_numbered_only_paragraph_is_weak_evidence(self):
+        """仅凭“一、”这类文本编号识别的段落，证据等级应为 1（弱），不能扩散到同格式正文。"""
+        doc = Document()
+        para = doc.add_paragraph('一、总体要求')
+        para.runs[0].font.size = Pt(16)
+
+        titled = doc.add_paragraph('总体要求')
+        titled.runs[0].font.size = Pt(16)
+        WordProcessor(DEFAULT_CONFIG.copy())._format_heading(titled, 2)
+
+        records = WordProcessor(DEFAULT_CONFIG.copy())._build_heading_records(doc)
+        by_text = {record['text']: record for record in records}
+        self.assertEqual(by_text['一、总体要求']['level'], 1)
+        self.assertEqual(by_text['一、总体要求']['evidence'], 1)
+        self.assertEqual(by_text['总体要求']['level'], 2)
+        self.assertEqual(by_text['总体要求']['evidence'], 2)
+
     def test_heading_text_heuristics(self):
         self.assertTrue(WordProcessor._looks_like_heading_text('工作要求'))
         self.assertFalse(WordProcessor._looks_like_heading_text('这是一段正文。'))
         self.assertFalse(WordProcessor._looks_like_heading_text('很长的一段正文内容' * 20))
+        self.assertFalse(
+            WordProcessor._looks_like_heading_text('动力元件；将机械能转换为压力能'),
+            '句中带断句标点的段落应按正文处理',
+        )
 
     def test_format_signature_differs_by_font_and_bold(self):
         doc = Document()
@@ -596,6 +617,38 @@ class HeadingLevelPlanTests(unittest.TestCase):
             {'index': 1, 'signature': None, 'level': None, 'evidence': 0, 'joinable': True},
         ]
         self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_numbered_anchor_does_not_promote_plain_paragraphs(self):
+        """只有“一、”这类编号证据时，同格式的其它段落不应被一并提成标题。"""
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 1,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0,
+             'numbered_level': None, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_body_dominant_group_is_not_filled(self):
+        """同格式段落以正文为主时，即使有标题样式证据也不整段补齐。"""
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 3, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+            {'index': 2, 'signature': 'same', 'level': None, 'evidence': 0, 'joinable': True},
+        ]
+        self.assertEqual(WordProcessor._plan_heading_levels(records), {})
+
+    def test_skip_callback_reports_plain_group_reason(self):
+        seen = []
+        records = [
+            {'index': 0, 'signature': 'same', 'level': 1, 'evidence': 1,
+             'numbered_level': 1, 'joinable': True},
+            {'index': 1, 'signature': 'same', 'level': None, 'evidence': 0,
+             'numbered_level': None, 'joinable': True},
+        ]
+        WordProcessor._plan_heading_levels(
+            records, on_skip=lambda reason, count: seen.append((reason, count))
+        )
+        self.assertEqual(seen, [('同类段落只有编号特征、缺少标题样式或大纲级别', 1)])
 
     def test_level_compaction_only_fills_gaps(self):
         self.assertEqual(WordProcessor._plan_level_compaction([1, 3]), {3: 2})
