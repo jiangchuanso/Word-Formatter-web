@@ -259,6 +259,14 @@ def apply_convenience_overrides(config, args):
         config["merge_broken_lines"] = True
     if getattr(args, "disable_merge_broken_lines", False):
         config["merge_broken_lines"] = False
+    if getattr(args, "use_builtin_styles", False):
+        config["use_builtin_styles"] = True
+    if getattr(args, "disable_builtin_styles", False):
+        config["use_builtin_styles"] = False
+    if getattr(args, "detect_article_title", False):
+        config["detect_article_title"] = True
+    if getattr(args, "disable_detect_article_title", False):
+        config["detect_article_title"] = False
     if getattr(args, "english_font", None):
         config["english_font"] = args.english_font
         config["use_custom_english_font"] = True
@@ -320,13 +328,15 @@ def collect_records(paths, recursive=True):
 
 
 def formatted_relative_path(relative):
-    return relative.with_name(f"{relative.stem}_formatted.docx")
+    """输出沿用原文件名（只把扩展名换成 .docx），不再追加 _formatted 后缀。"""
+    return relative.with_name(f"{relative.stem}.docx")
 
 
-def unique_path(path, seen):
+def unique_path(path, seen, source=None):
+    """重名时追加序号；同时避开源文件本身，保证不覆盖原始文件。"""
     candidate = path
     counter = 2
-    while candidate in seen:
+    while candidate in seen or (source is not None and candidate == source):
         candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
         counter += 1
     seen.add(candidate)
@@ -340,11 +350,13 @@ def build_jobs(input_paths, output_arg, recursive=True):
     if len(records) == 1 and records[0].source.is_file():
         source = records[0].source
         if output_path is None:
-            output = source.with_name(f"{source.stem}_formatted.docx")
+            output = source.with_name(f"{source.stem}.docx")
         elif output_path.suffix.lower() == ".docx":
             output = output_path
         else:
-            output = output_path / f"{source.stem}_formatted.docx"
+            output = output_path / f"{source.stem}.docx"
+        if output == source:
+            output = unique_path(output, set(), source)
         return [Job(source, output)]
 
     if output_path is None:
@@ -361,8 +373,8 @@ def build_jobs(input_paths, output_arg, recursive=True):
     jobs = []
     seen = set()
     for record in records:
-        rel_output = unique_path(formatted_relative_path(record.relative), seen)
-        jobs.append(Job(record.source, output_dir / rel_output))
+        target = output_dir / formatted_relative_path(record.relative)
+        jobs.append(Job(record.source, unique_path(target, seen, record.source)))
     return jobs
 
 
@@ -511,6 +523,10 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-detect-chapter-section", action="store_true", help="关闭章/节层级识别")
     parser.add_argument("--merge-broken-lines", action="store_true", help="合并等长断行（还原 PDF 粘贴导致的段落断裂）")
     parser.add_argument("--disable-merge-broken-lines", action="store_true", help="关闭等长断行合并")
+    parser.add_argument("--use-builtin-styles", action="store_true", help="用内置标准样式（正文/标题 1~4）统一同级文字（默认开启）")
+    parser.add_argument("--disable-builtin-styles", action="store_true", help="关闭标准样式统一，改用逐段直接格式")
+    parser.add_argument("--detect-article-title", action="store_true", help="识别“第X条”为条标题并在条后分段（默认开启）")
+    parser.add_argument("--disable-detect-article-title", action="store_true", help="关闭条标题识别")
     parser.add_argument(
         "--preset", choices=sorted(PRESET_GROUPS),
         help="快捷配置组：format=公文格式排版，clean=排版清洗（在 --set 之前生效，可被后续参数覆盖）",

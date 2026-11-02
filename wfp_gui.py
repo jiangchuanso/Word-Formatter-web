@@ -154,6 +154,8 @@ class WordFormatterGUI:
         self.media_single_line_spacing_var = tk.BooleanVar(value=self.default_params.get('media_single_line_spacing', False))
         self.normalize_heading_levels_var = tk.BooleanVar(value=self.default_params.get('normalize_heading_levels', False))
         self.detect_chapter_section_var = tk.BooleanVar(value=self.default_params.get('detect_chapter_section', False))
+        self.use_builtin_styles_var = tk.BooleanVar(value=self.default_params.get('use_builtin_styles', True))
+        self.detect_article_title_var = tk.BooleanVar(value=self.default_params.get('detect_article_title', True))
         self.merge_broken_lines_var = tk.BooleanVar(value=self.default_params.get('merge_broken_lines', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
         self.enable_table_var = tk.BooleanVar(value=self.default_params['enable_table_formatting'])
@@ -765,6 +767,13 @@ class WordFormatterGUI:
         ttk.Checkbutton(advanced_frame, text="启用符号标准化", variable=self.normalize_punctuation_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         ttk.Checkbutton(
+            advanced_frame, text="用标准样式统一同级文字", variable=self.use_builtin_styles_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="识别条标题（第X条）", variable=self.detect_article_title_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
             advanced_frame,
             text="自定义数字和字母字体",
             variable=self.use_custom_english_font_var,
@@ -924,6 +933,8 @@ class WordFormatterGUI:
         self.media_single_line_spacing_var.set(loaded_config.get('media_single_line_spacing', False))
         self.normalize_heading_levels_var.set(loaded_config.get('normalize_heading_levels', False))
         self.detect_chapter_section_var.set(loaded_config.get('detect_chapter_section', False))
+        self.use_builtin_styles_var.set(loaded_config.get('use_builtin_styles', True))
+        self.detect_article_title_var.set(loaded_config.get('detect_article_title', True))
         self.merge_broken_lines_var.set(loaded_config.get('merge_broken_lines', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
         self.enable_table_var.set(loaded_config.get('enable_table_formatting', False))
@@ -1001,6 +1012,8 @@ class WordFormatterGUI:
         config['media_single_line_spacing'] = self.media_single_line_spacing_var.get()
         config['normalize_heading_levels'] = self.normalize_heading_levels_var.get()
         config['detect_chapter_section'] = self.detect_chapter_section_var.get()
+        config['use_builtin_styles'] = self.use_builtin_styles_var.get()
+        config['detect_article_title'] = self.detect_article_title_var.get()
         config['merge_broken_lines'] = self.merge_broken_lines_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
         config['enable_table_formatting'] = self.enable_table_var.get()
@@ -1154,6 +1167,7 @@ class WordFormatterGUI:
   • 二级标题: “（一）”, “（二）” ...
   • 三级标题: “1.”, “2.” ...
   • 四级标题: “(1)”, “(2)” ...
+  • 条标题: “第X条”“第XX条”“第XXX条”（默认开启）。级别跟随章/节顺延：有章时 2 级、章+节时 3 级、无章无节时 1 级；条后空格会被清除，条后紧跟的正文自动另起一段按正文排版。
   • 注：正文、三级、四级标题默认共用一套字体字号。
 
 - 其他元素:
@@ -1164,7 +1178,8 @@ class WordFormatterGUI:
 【其他特性】
 - 纸张设置：直接输入文本默认使用A4纸。文件处理默认保持原样，可勾选“强制设置为A4纸张”进行修改。
 - 保留原文格式：统一格式时，会保留【加粗、斜体、下划线、字体颜色】等。
-- 标准样式统一：段落等级确定后，各级字体字号加粗行距会写进 Word「标准样式」组的【正文 / 标题 1~4】，并把同级段落套上对应样式，同级文字共用一套样式，后续改样式即可整体同步。未排版的内容（表格、页眉页脚、空行）保持原有字体字号。
+- 标准样式统一（默认开启，可在全局选项关闭）：段落等级确定后，各级字体字号加粗行距会写进 Word「标准样式」组的【正文 / 标题 1~4】，并把同级段落套上对应样式，同级文字共用一套样式，后续改样式即可整体同步。未排版的内容（表格、页眉页脚、空行）保持原有字体字号。
+- 输出文件名：与源文件同名（不再追加 _formatted 后缀）；与源文件冲突时自动追加序号，绝不覆盖原件。
 - 二级标题智能拆分：若二级标题后紧跟正文（如"（一）标题。正文..."），会自动在【同一个段落内】为标题和正文应用不同格式。
 - 豁免内容：图片、嵌入对象等内容会自动跳过格式化；表格仅在勾选“启用表格自动调整”后处理。
 - 参数自定义：所有核心参数均可在界面调整。配置方案可【保存】和【加载】。
@@ -1267,16 +1282,31 @@ class WordFormatterGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @staticmethod
+    def _unique_output_path(output_dir, stem, input_path, used_paths):
+        """输出沿用原文件名；与源文件同名或本次已有同名输出时追加序号，避免覆盖。"""
+        candidate = os.path.join(output_dir, f"{stem}.docx")
+        counter = 2
+        while True:
+            key = os.path.normcase(os.path.abspath(candidate))
+            if key != os.path.normcase(os.path.abspath(input_path)) and key not in used_paths:
+                break
+            candidate = os.path.join(output_dir, f"{stem}_{counter}.docx")
+            counter += 1
+        used_paths.add(key)
+        return candidate
+
     def _process_files(self, processor, file_list, output_dir):
         success_count, fail_count, skipped_count = 0, 0, 0
         total = len(file_list)
+        used_outputs = set()
         for i, input_path in enumerate(file_list, start=1):
             base_name = os.path.basename(input_path)
             self._set_progress((i - 1) / total * 100, f"处理中 {i}/{total}: {base_name}")
             try:
                 self.log_to_debug_window(f"\n--- 开始处理文件 {i}/{total}: {base_name} ---")
                 output_name = os.path.splitext(base_name)[0]
-                output_path = os.path.join(output_dir, f"{output_name}_formatted.docx")
+                output_path = self._unique_output_path(output_dir, output_name, input_path, used_outputs)
                 processor.format_document(input_path, output_path)
                 self.log_to_debug_window(f"✅ 文件处理成功，已保存至: {output_path}")
                 success_count += 1

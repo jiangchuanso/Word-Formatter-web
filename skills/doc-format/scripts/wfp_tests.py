@@ -792,6 +792,29 @@ class DeepestHeadingWithoutBodyTests(unittest.TestCase):
             finally:
                 processor._cleanup_temp_files()
 
+    def test_only_deepest_level_is_demoted(self):
+        # 只有文档中最深的标题级别才可能降级；上级标题即使后面紧跟同级标题也保留。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、总体要求")   # L1，其后没有正文，但有更深的 L3
+            doc.add_paragraph("二、工作安排")   # L1
+            doc.add_paragraph("1. 具体事项")    # L3，其后有正文
+            doc.add_paragraph("具体内容。")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                self.assertEqual(self._outline_val(paras[0]), 0)  # Lv1 保留
+                self.assertEqual(self._outline_val(paras[1]), 0)  # Lv1 保留
+                self.assertEqual(self._outline_val(paras[2]), 2)  # Lv3 保留
+            finally:
+                processor._cleanup_temp_files()
+
     def test_demoted_heading_overrides_existing_outline_level(self):
         # 降级处理应把段落直接大纲级别覆盖为正文级（val=9），覆盖已有的 Lv3。
         with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
@@ -1251,6 +1274,23 @@ class LevelStyleUnificationTests(unittest.TestCase):
             self.assertIsNone(WordProcessor(DEFAULT_CONFIG.copy())._get_outline_level(
                 formatted.paragraphs[0]))
 
+    def test_switch_off_keeps_direct_formatting(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_style_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            doc = Document()
+            doc.add_paragraph("一、总体要求")
+            doc.add_paragraph("正文内容。")
+            doc.save(source)
+
+            formatted = self._format(source, output, {"use_builtin_styles": False})
+            heading = formatted.paragraphs[0]
+            # 关闭统一后不再套样式，字体字号与大纲级别仍写在段落里
+            self.assertEqual(heading.style.name, "Normal")
+            self.assertEqual(heading.runs[0].font.size, Pt(DEFAULT_CONFIG["h1_size"]))
+            ppr = heading._p.find(qn("w:pPr"))
+            self.assertEqual(ppr.find(qn("w:outlineLvl")).get(qn("w:val")), "0")
+
     def test_second_run_keeps_styles_and_style_based_signature(self):
         # 再次排版已统一的文档：等级仍按样式确定，格式指纹能回退到样式定义
         with tempfile.TemporaryDirectory(prefix="wfp_style_") as tmpdir:
@@ -1311,6 +1351,124 @@ class LevelStyleUnificationTests(unittest.TestCase):
                 if str(part.partname).startswith("/word/header")
             ]
             self.assertFalse(headers, f"不应新建页眉部件: {headers}")
+
+
+class ArticleTitleTests(unittest.TestCase):
+    """「第X条」条标题：跟随章/节顺延等级，条后正文另起一段，可用开关关闭。"""
+
+    @staticmethod
+    def _outline_val(para):
+        ppr = para._p.find(qn("w:pPr"))
+        if ppr is None:
+            return None
+        node = ppr.find(qn("w:outlineLvl"))
+        return None if node is None else int(node.get(qn("w:val")))
+
+    def _format(self, doc_builder, config=None):
+        tmpdir = tempfile.TemporaryDirectory(prefix="wfp_article_")
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        source, output = root / "in.docx", root / "out.docx"
+        doc = Document()
+        doc_builder(doc)
+        doc.save(source)
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update(config or {})
+        processor = WordProcessor(cfg)
+        self.addCleanup(processor._cleanup_temp_files)
+        processor.format_document(str(source), str(output))
+        return Document(output)
+
+    @staticmethod
+    def _chapter_section_articles(doc):
+        doc.add_paragraph("第一章 总则")
+        doc.add_paragraph("第一节 目的")
+        doc.add_paragraph("第一条 为了加强管理，制定本办法。")
+        doc.add_paragraph("第二条   本办法适用于全部单位。")
+
+    @staticmethod
+    def _articles_only(doc):
+        doc.add_paragraph("第一条 为规范管理，制定本规定。")
+        doc.add_paragraph("第二条 本规定自发布之日起施行。")
+
+    def test_article_level_follows_chapter_and_section(self):
+        formatted = self._format(self._chapter_section_articles)
+        paras = formatted.paragraphs
+        self.assertEqual(
+            [p.style.name for p in paras],
+            ["Heading 1", "Heading 2", "Heading 3", "Normal", "Heading 3", "Normal"],
+        )
+        self.assertEqual([self._outline_val(p) for p in paras[:3]], [0, 1, 2])
+
+    def test_article_body_is_split_into_next_paragraph(self):
+        formatted = self._format(self._chapter_section_articles)
+        paras = formatted.paragraphs
+        self.assertEqual(paras[2].text, "第一条")
+        self.assertEqual(paras[3].text, "为了加强管理，制定本办法。")
+        # 条后面多余的空格被清掉
+        self.assertEqual(paras[4].text, "第二条")
+        self.assertEqual(paras[5].text, "本办法适用于全部单位。")
+
+    def test_article_is_level_two_when_only_chapter_exists(self):
+        def build(doc):
+            doc.add_paragraph("第一章 总则")
+            doc.add_paragraph("第一条 为加强管理，制定本办法。")
+            doc.add_paragraph("第二条 本办法适用于全部单位。")
+
+        formatted = self._format(build)
+        paras = formatted.paragraphs
+        self.assertEqual(
+            [p.style.name for p in paras],
+            ["Heading 1", "Heading 2", "Normal", "Heading 2", "Normal"],
+        )
+        self.assertEqual([self._outline_val(p) for p in paras[:4]], [0, 1, None, 1])
+
+    def test_article_without_chapter_or_section_is_level_one(self):
+        formatted = self._format(self._articles_only)
+        paras = formatted.paragraphs
+        self.assertEqual([p.style.name for p in paras], ["Heading 1", "Normal", "Heading 1", "Normal"])
+        self.assertEqual([self._outline_val(p) for p in paras], [0, None, 0, None])
+
+    def test_article_detection_can_be_disabled(self):
+        formatted = self._format(self._articles_only, {"detect_article_title": False})
+        paras = formatted.paragraphs
+        self.assertEqual(len(paras), 2)
+        self.assertEqual(paras[0].text, "第一条 为规范管理，制定本规定。")
+        self.assertEqual(paras[0].style.name, "Normal")
+
+
+class OutputNamingTests(unittest.TestCase):
+    """输出文件保持原文件名，不再追加 _formatted 后缀，且不覆盖源文件。"""
+
+    def test_single_file_keeps_name_and_never_overwrites_source(self):
+        import wfp_cli
+
+        with tempfile.TemporaryDirectory(prefix="wfp_name_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "报告.docx"
+            Document().save(source)
+
+            jobs = wfp_cli.build_jobs([str(source)], None, recursive=True)
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].output.parent, root)
+            self.assertNotEqual(jobs[0].output, source)
+            self.assertEqual(jobs[0].output.name, "报告_2.docx")
+
+    def test_directory_batch_keeps_original_names(self):
+        import wfp_cli
+
+        with tempfile.TemporaryDirectory(prefix="wfp_name_") as tmpdir:
+            root = Path(tmpdir)
+            inputs = root / "in"
+            inputs.mkdir()
+            Document().save(inputs / "甲.docx")
+            (inputs / "乙.txt").write_text("内容", encoding="utf-8")
+            out_dir = root / "out"
+
+            jobs = wfp_cli.build_jobs([str(inputs)], str(out_dir), recursive=True)
+            names = sorted(job.output.name for job in jobs)
+            self.assertEqual(names, sorted(["甲.docx", "乙.docx"]))
+            self.assertTrue(all(job.output.parent == out_dir.resolve() for job in jobs))
 
 
 def main(argv=None):

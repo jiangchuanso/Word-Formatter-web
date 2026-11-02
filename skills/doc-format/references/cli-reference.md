@@ -65,6 +65,10 @@ python scripts/wfp_cli.py test
 | `--disable-detect-chapter-section` | 关闭 | 关闭章/节层级识别 |
 | `--merge-broken-lines` | 关闭 | 合并等长断行（还原 PDF 粘贴导致的段落断裂） |
 | `--disable-merge-broken-lines` | 关闭 | 关闭等长断行合并 |
+| `--use-builtin-styles` | 开启 | 用内置标准样式（正文/标题 1~4）统一同级文字 |
+| `--disable-builtin-styles` | 开启 | 关闭标准样式统一，改用逐段直接格式 |
+| `--detect-article-title` | 开启 | 识别「第X条」为条标题，条后正文另起一段 |
+| `--disable-detect-article-title` | 开启 | 关闭条标题识别 |
 | `--preset format` | 无 | 快捷配置「公文格式排版」：页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别 |
 | `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节识别、标题等级合并 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
@@ -163,6 +167,6 @@ python scripts/wfp_cli.py format -i input.docx -v
 
 - 成功时 stdout 每行打印一个输出 `.docx` 的绝对路径。
 - `-v/--verbose` 开启后，详细处理日志写入 stderr。
-- 单文件默认输出到同目录 `*_formatted.docx`。
+- 输出文件沿用源文件名，只把扩展名换成 `.docx`（不再追加 `_formatted`）；若与源文件同名（单文件且未指定 `-o`）或本次已有同名输出，会追加 `_2`、`_3` 等序号，绝不覆盖源文件。
 - 目录默认输出到 `<输入目录>_formatted/`，或用户指定的输出目录。
 - 退出码 `0` 表示没有失败；旧格式因缺少 LibreOffice 被跳过时会写入 stderr。非 `0` 表示没有找到可处理文件或至少一个文件失败。

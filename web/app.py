@@ -256,7 +256,12 @@ async def format_files(
         # 只取文件名部分，防止 multipart filename 携带路径分量导致越界写入
         clean_name = (original_name or "").replace("\\", "/").split("/")[-1]
         base = os.path.splitext(clean_name)[0].strip() or "document"
-        out_path = job_output_dir / f"{base}_formatted.docx"
+        # 输出沿用原文件名（上传与输出是不同目录，不会覆盖源文件）；同名时追加序号
+        out_path = job_output_dir / f"{base}.docx"
+        counter = 2
+        while out_path.exists():
+            out_path = job_output_dir / f"{base}_{counter}.docx"
+            counter += 1
         try:
             logs = await loop.run_in_executor(
                 None, _run_format, in_path, str(out_path), coerced

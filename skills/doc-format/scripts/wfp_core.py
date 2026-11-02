@@ -131,6 +131,8 @@ RE_CHAPTER_TITLE = re.compile(
     r'^(?:第\s*[一二三四五六七八九十百千万零〇\d]+\s*章|ATA\s*\d+\s*章)', re.IGNORECASE
 )
 RE_SECTION_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]+\s*节')
+# 条标题：第X条 / 第XX条 / 第XXX条，级别跟随章/节顺延（无章无节时为 1 级）
+RE_ARTICLE_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]{1,6}\s*条')
 
 # 等长断行合并（PDF 粘贴常见）：满行长度下限、同长度行出现次数下限、长度容差
 BROKEN_LINE_MIN_LENGTH = 15
@@ -384,6 +386,8 @@ class WordProcessor:
         self.temp_files = []
         # 章/节识别开启时，编号标题（一、/（一）/1./（1））需要整体顺延的大纲级数
         self._outline_offset = 0
+        # 条标题（第X条）的大纲级别，按章/节是否出现决定
+        self._article_level = 1
         # 逐段排版时登记的最终等级（key 为段落的 XML 元素 id），供排版结束后统一套用内置样式
         self._level_records = {}
         self.sys_temp_dir = tempfile.gettempdir()
@@ -2045,27 +2049,49 @@ class WordProcessor:
     # 可选增强四：章/节层级识别
     # ------------------------------------------------------------------
     def _prepare_chapter_section_offset(self, doc):
-        """开启章/节识别时，按文档实际层级决定编号标题的顺延级数。
+        """按文档实际层级决定章/节/条与编号标题的级数。
 
-        文档有“第X章” → 章=1、节=2，编号标题顺延 2 级；
-        只有“第X节” → 节=1，编号标题顺延 1 级；都没有则保持原有层级。
+        文档有“第X章” → 章=1、节=2，条=3，编号标题顺延 2 级；
+        只有“第X节” → 节=1，条=2，编号标题顺延 1 级；都没有则保持原有层级。
+        文档含“第X条”时也按章/节结构处理（条标题需要其上级层级），否则只在
+        开启“识别章/节层级”时生效。
         """
         self._outline_offset = 0
-        if not self.config.get('detect_chapter_section', False):
+        self._article_level = 1
+        detect_chapter = self.config.get('detect_chapter_section', False)
+        detect_article = self.config.get('detect_article_title', True)
+        if not detect_chapter and not detect_article:
             return
 
-        has_chapter = has_section = False
+        has_chapter = has_section = has_article = False
         for para in doc.paragraphs:
             text = para.text.strip()
-            if not text or len(text) > HEADING_TEXT_MAX_LENGTH:
+            if not text:
+                continue
+            # 条标题常与正文同段（“第一条 为了……”），只看前缀，不做标点过滤
+            if detect_article and not has_article and RE_ARTICLE_TITLE.match(text):
+                has_article = True
+            if len(text) > HEADING_TEXT_MAX_LENGTH:
                 continue
             if any(punct in text for punct in BODY_SENTENCE_PUNCTUATION):
                 continue
             if RE_CHAPTER_TITLE.match(text):
                 has_chapter = True
-                break
+                continue
             if not has_section and RE_SECTION_TITLE.match(text):
                 has_section = True
+
+        if has_article:
+            # 条标题只在章/节之下顺延一级：章+节=3 级，只有章或只有节=2 级，都没有=1 级
+            if has_chapter and has_section:
+                self._article_level = 3
+            elif has_chapter or has_section:
+                self._article_level = 2
+            else:
+                self._article_level = 1
+
+        if not detect_chapter and not (detect_article and has_article):
+            return
 
         self._outline_offset = 2 if has_chapter else (1 if has_section else 0)
         if self._outline_offset:
@@ -2073,8 +2099,12 @@ class WordProcessor:
             self._log(
                 f"检测到{kind}标题，章/节按 1/2 级处理，编号标题整体顺延 {self._outline_offset} 级。"
             )
-        else:
+        elif not has_article:
             self._log("未检测到“第X章/第X节”标题，章/节识别不生效。")
+        if has_article:
+            self._log(
+                f"检测到“第X条”条标题，条标题按 Lv{self._article_level} 处理，条后正文另起一段。"
+            )
 
     def _chapter_section_level(self, text):
         """识别章/节标题并返回绝对大纲级别（1/2）；不适用时返回 None。"""
@@ -2091,6 +2121,76 @@ class WordProcessor:
             return 2 if self._outline_offset >= 2 else 1
         return None
 
+    # ------------------------------------------------------------------
+    # 条标题：第X条
+    # ------------------------------------------------------------------
+    def _article_title_level(self, text):
+        """「第X条」条标题的绝对大纲级别：章/节之下顺延一级，无章无节时为 1 级。"""
+        if not self.config.get('detect_article_title', True):
+            return None
+        value = (text or '').strip()
+        if not value or len(value) > HEADING_TEXT_MAX_LENGTH:
+            return None
+        if any(punct in value for punct in BODY_SENTENCE_PUNCTUATION):
+            return None
+        if not RE_ARTICLE_TITLE.match(value):
+            return None
+        return min(self._article_level, MAX_TITLE_OUTLINE_LEVEL)
+
+    def _split_article_paragraphs(self, doc):
+        """把「第X条 正文……」拆成两段：条标题独立成段，其余文字另起一段作正文。"""
+        if not self.config.get('detect_article_title', True):
+            return 0
+        split_count = 0
+        for para in list(doc.paragraphs):
+            text = para.text
+            stripped = text.lstrip()
+            if not stripped:
+                continue
+            match = RE_ARTICLE_TITLE.match(stripped)
+            if match is None:
+                continue
+            if self._has_drawing_or_pict(para) or self._has_embedded_object(para):
+                continue
+            cut = len(text) - len(stripped) + match.end()
+            if not text[cut:].strip():
+                continue
+            new_para = self._split_paragraph_at(para, cut)
+            if new_para is not None:
+                self._strip_leading_whitespace(new_para)
+                split_count += 1
+        if split_count:
+            self._log(f"条标题识别：{split_count} 个「第X条」段落已按条拆分（条后正文另起一段）。")
+        return split_count
+
+    def _split_paragraph_at(self, para, cut):
+        """在第 cut 个字符处把段落一分为二，返回放在原段落之后的新段落。"""
+        if cut <= 0 or cut >= len(para.text):
+            return None
+        new_p = OxmlElement('w:p')
+        para._p.addnext(new_p)
+        new_para = Paragraph(new_p, para._parent)
+        moved, position = [], 0
+        for run in list(para.runs):
+            run_text = run.text
+            start, end = position, position + len(run_text)
+            position = end
+            if end <= cut:
+                continue
+            if start >= cut:
+                moved.append(run._r)
+                continue
+            keep = run_text[:cut - start]
+            tail = run_text[cut - start:]
+            run.text = keep
+            tail_run = new_para.add_run(tail)
+            r_pr = run._r.find(qn('w:rPr'))
+            if r_pr is not None:
+                tail_run._r.insert(0, copy.deepcopy(r_pr))
+        for element in moved:
+            new_p.append(element)
+        return new_para
+
     def _paragraph_heading_rank(self, text_to_check):
         """按编号/章节特征返回段落的大纲级别，非标题返回 0。
 
@@ -2101,6 +2201,9 @@ class WordProcessor:
         chapter = self._chapter_section_level(value)
         if chapter is not None:
             return chapter
+        article = self._article_title_level(value)
+        if article is not None:
+            return article
         if RE_HEADING_H1.match(value):
             return 1 + self._outline_offset
         if RE_HEADING_H2.match(value):
@@ -2163,6 +2266,8 @@ class WordProcessor:
         value = (text or '').strip()
         if not value:
             return False
+        if self.config.get('detect_article_title', True) and RE_ARTICLE_TITLE.match(value):
+            return True
         return bool(
             RE_HEADING_H1.match(value)
             or RE_HEADING_H2.match(value)
@@ -2883,6 +2988,12 @@ class WordProcessor:
             self._log("正在把浮动式对象转换为插入式...")
             self._convert_floating_to_inline(doc)
 
+        # 条标题：先把「第X条 正文……」拆成“条标题 + 正文”两段，再进入逐段排版
+        self._level_records = {}
+        if self.config.get('detect_article_title', True):
+            self._log("正在识别条标题（第X条）...")
+            self._split_article_paragraphs(doc)
+
         all_blocks = list(self._iter_block_items(doc))
         processed_indices = set()
 
@@ -2923,9 +3034,12 @@ class WordProcessor:
                 _stack.pop()
             scope_end[_i] = _stack[-1] if _stack else total
             _stack.append(_i)
+        # 只有文档中最深的标题级别才可能“其实只是正文”，上级标题即使局部没有正文也保留
+        # （它们是结构层级，例如紧接着下一个同级标题的分章标题）。
+        deepest_rank = max(heading_ranks) if heading_ranks else 0
         self._demoted_body = [False] * total
         for _i in range(total):
-            if heading_ranks[_i] <= 0:
+            if heading_ranks[_i] <= 0 or heading_ranks[_i] < deepest_rank:
                 continue
             _end = scope_end[_i]
             # 局部范围内更深的下级标题数（非 0 说明它是父级标题，应保留）。
@@ -3104,6 +3218,7 @@ class WordProcessor:
             leading_space_count = len(original_text) - len(text_to_check)
             para_text_preview = text_to_check[:30].replace("\n", " ")
             chapter_level = self._chapter_section_level(text_to_check)
+            article_level = self._article_title_level(text_to_check)
             
             spacing = para._p.get_or_add_pPr().get_or_add_spacing()
             spacing.set(qn('w:beforeAutospacing'), '0'); spacing.set(qn('w:afterAutospacing'), '0')
@@ -3238,6 +3353,20 @@ class WordProcessor:
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
                     self._record_paragraph_level(para, chapter_level)
+
+            elif article_level is not None:
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(article_level)
+                    self._log(f"段落 {current_block_num}: 条标题（大纲 Lv{article_level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, article_level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
+                    self._record_paragraph_level(para, article_level)
 
             elif RE_HEADING_H1.match(text_to_check):
                 level = 1 + self._outline_offset
@@ -3404,7 +3533,10 @@ class WordProcessor:
             self._log("\n正在检查标题等级是否跳级...")
             self._compact_outline_levels(doc, exclude_elements=protected_paragraphs)
 
-        self._apply_level_styles(doc)
+        if self.config.get('use_builtin_styles', True):
+            self._apply_level_styles(doc)
+        else:
+            self._level_records = {}
 
         self._apply_page_setup(doc, is_from_txt=is_from_txt)
         self._log("正在保存最终文档...")

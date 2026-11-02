@@ -28,6 +28,8 @@ DEFAULT_CONFIG = {
     'left_indent_chars': 0.0, 'right_indent_chars': 0.0, 'first_line_indent_chars': 2.0,
     'title_bold': False, 'h1_bold': False, 'h2_bold': False,
     'set_outline': True, 'enable_attachment_formatting': True,
+    'use_builtin_styles': True,  # 把各级格式写进内置标准样式（正文/标题 1~4）并用样式统一同级文字
+    'detect_article_title': True,  # 识别“第X条”为条标题，条后正文另起一段
     'force_a4': False, 'use_custom_english_font': False, 'english_font': 'Times New Roman',
     'blank_line_mode': DEFAULT_BLANK_LINE_MODE, 'normalize_punctuation': False,
     # 可选增强项，默认全部关闭，避免改变既有排版结果

@@ -124,7 +124,7 @@
         <div class="dropzone" id="dropzone">点击或拖拽文件到此处（支持 .docx/.doc/.wps/.txt/.md）</div>
         <input type="file" id="fileInput" multiple accept=".docx,.doc,.wps,.txt,.md" style="display:none" />
         <ul id="fileList"></ul>
-        <div class="footnote">支持批量上传，每个文件独立排版后输出 <code>_formatted.docx</code>。</div>
+        <div class="footnote">支持批量上传，每个文件独立排版后输出与原文件同名的 <code>.docx</code>。</div>
       </div>
 
       <div id="textPanel" style="display:none">
@@ -165,7 +165,8 @@
       <h2>使用说明</h2>
       <ul style="font-size:13px;color:var(--muted);line-height:1.7;padding-left:18px;margin:0">
         <li><b>智能识别</b>：自动识别主/副标题、一~四级层级标题、图/表标题、附件等。</li>
-        <li><b>标准样式统一</b>：各级字体字号写进 Word「标准样式」的「正文 / 标题 1~4」，同级段落共用一套样式，后续改样式即可整体同步。</li>
+        <li><b>条标题</b>：识别「第X条」，级别跟随章/节顺延，条后正文自动另起一段（可在全局选项关闭）。</li>
+        <li><b>标准样式统一</b>：各级字体字号写进 Word「标准样式」的「正文 / 标题 1~4」，同级段落共用一套样式，后续改样式即可整体同步（默认开启）。</li>
         <li><b>快捷配置</b>：参数区顶部「公文格式排版 / 排版清洗」可一键套用该类别推荐配置。</li>
         <li><b>原始文件安全</b>：所有操作在服务器端临时副本上进行，<b>不会修改</b>你的源文件。</li>
         <li><b>旧格式</b>：.doc/.wps 由服务器端 Office/WPS（Windows）或 LibreOffice（Linux/macOS）转换。</li>
@@ -333,6 +334,10 @@ function buildForm() {
   // 全局选项
   html.push(`<div class="section"><div class="sec-title">全局选项</div>
     <label class="check"><input type="checkbox" data-key="set_outline" data-type="bool"> 自动设置大纲级别（用于生成导航目录）</label>
+    <div class="checkgroup">
+      <label class="check"><input type="checkbox" data-key="use_builtin_styles" data-type="bool"> 用标准样式统一同级文字（正文 / 标题 1~4）</label>
+      <label class="check"><input type="checkbox" data-key="detect_article_title" data-type="bool"> 识别条标题（第X条，条后正文另起一段）</label>
+    </div>
     <div class="checkgroup" style="margin-top:8px">
       <label class="check"><input type="checkbox" data-key="use_custom_english_font" data-type="bool"> 自定义数字和字母字体</label>
       ${field('数字和字母字体','english_font','select',fontOptions('english'))}

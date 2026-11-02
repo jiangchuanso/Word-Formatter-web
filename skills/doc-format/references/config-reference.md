@@ -41,6 +41,8 @@
 | 浮动图片/对象/表格改为插入式 | `--convert-floating-objects`（`convert_floating_objects=true`） |
 | 含图片段落改为单倍行距 | `--media-single-line-spacing`（`media_single_line_spacing=true`） |
 | 同格式标题归并并补齐跳级 | `--normalize-heading-levels`（`normalize_heading_levels=true`，需 `set_outline=true`） |
+| 关闭标准样式统一（默认开启） | `--disable-builtin-styles`（`use_builtin_styles=false`） |
+| 关闭条标题识别（默认开启） | `--disable-detect-article-title`（`detect_article_title=false`） |
 | TXT/MD 不改动任何空行 | `--set blank_line_mode="不改动任何空行"` |
 | TXT/MD 删除单个空行，多个空行保留至 1 个 | `--set blank_line_mode="删除单个空行，多个空行保留至1个空行"` |
 | TXT/MD 保留单个空行，多个空行保留至 1 个 | `--set blank_line_mode="保留单个空行，多个空行保留至1个空行"` |
