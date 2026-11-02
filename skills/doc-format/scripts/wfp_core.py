@@ -22,10 +22,12 @@ import uuid
 
 from docx import Document
 from docx.document import Document as _Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.styles.styles import StyleFactory
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.shared import Pt, Cm, RGBColor
@@ -94,6 +96,31 @@ RE_HEADING_STYLE_NAME = re.compile(r'^(?:heading\s*\d+|标题\s*\d+)$', re.IGNOR
 # 可选增强：大纲级别上限（w:outlineLvl 的 9 表示正文级，不做标题处理）
 MAX_HEADING_LEVEL = 9
 MAX_TITLE_OUTLINE_LEVEL = MAX_HEADING_LEVEL - 1
+
+# 标准样式统一：把各级字体字号写进 Word「标准样式」组里的内置样式，
+# 再把这些样式套到对应段落上，同一个等级的段落共用一套样式。
+BUILTIN_BODY_STYLE_NAME = 'Normal'
+BUILTIN_BODY_STYLE_ALIASES = ('正文',)
+BUILTIN_HEADING_STYLE_NAMES = {
+    1: 'Heading 1',
+    2: 'Heading 2',
+    3: 'Heading 3',
+    4: 'Heading 4',
+}
+BUILTIN_HEADING_STYLE_ALIASES = {
+    1: ('标题 1', '标题1'),
+    2: ('标题 2', '标题2'),
+    3: ('标题 3', '标题3'),
+    4: ('标题 4', '标题4'),
+}
+MAX_STYLE_HEADING_LEVEL = max(BUILTIN_HEADING_STYLE_NAMES)
+# 内置样式自带的主题字体/主题色会盖掉显式字体，写样式前先清掉
+STYLE_THEME_FONT_ATTRIBUTES = (
+    'w:asciiTheme', 'w:hAnsiTheme', 'w:eastAsiaTheme', 'w:cstheme', 'w:csTheme',
+)
+STYLE_THEME_COLOR_ATTRIBUTES = ('w:themeColor', 'w:themeShade', 'w:themeTint')
+# 由样式统一提供的字符属性；段落上这些直接格式会被清掉，其余（加粗/斜体/下划线/颜色）保留
+STYLE_DIRECT_RUN_TAGS = ('w:rFonts', 'w:sz', 'w:szCs')
 HEADING_TEXT_MAX_LENGTH = 60
 HEADING_TAIL_PUNCTUATION = '。；，、：!！?？…'
 # 句中一旦出现这些断句标点，说明该段在讲完整句子，属于正文而不是标题
@@ -357,6 +384,8 @@ class WordProcessor:
         self.temp_files = []
         # 章/节识别开启时，编号标题（一、/（一）/1./（1））需要整体顺延的大纲级数
         self._outline_offset = 0
+        # 逐段排版时登记的最终等级（key 为段落的 XML 元素 id），供排版结束后统一套用内置样式
+        self._level_records = {}
         self.sys_temp_dir = tempfile.gettempdir()
         self.log_callback = log_callback
         self.com_manager = com_manager or WPSAppManager(log_callback)
@@ -1007,6 +1036,13 @@ class WordProcessor:
         if should_set_a4:
             self._log("  > 已将页面大小设置为 A4。")
 
+    def _run_font_family(self, font_name):
+        """按配置给出西文字体（数字、字母）：未启用自定义时与中文字体一致。"""
+        if self.config.get('use_custom_english_font', False):
+            en_font = self.config.get('english_font') or font_name
+            return en_font
+        return font_name
+
     def _set_run_font(self, run, font_name, size_pt, set_color=False):
         run.font.size = Pt(size_pt)
         if set_color: run.font.color.rgb = RGBColor(0, 0, 0)
@@ -1016,8 +1052,7 @@ class WordProcessor:
             rFonts.attrib.pop(qn(theme_attr), None)
         rFonts.set(qn('w:eastAsia'), font_name)
         # 根据配置决定西文字体（数字、字母）
-        en_font = self.config.get('english_font') if self.config.get('use_custom_english_font', False) else font_name
-        en_font = en_font or font_name
+        en_font = self._run_font_family(font_name)
         run.font.name = en_font
         rFonts.set(qn('w:ascii'), en_font)
         rFonts.set(qn('w:hAnsi'), en_font)
@@ -1091,7 +1126,7 @@ class WordProcessor:
     def _get_outline_level(self, para):
         """
         读取段落的当前大纲级别
-        返回: 0-8 表示级别1-9，None 表示未设置
+        返回: 0-8 表示级别1-9，9 表示正文级（显式覆盖样式），None 表示未设置
         """
         pPr = para._p.get_or_add_pPr()
         outlineLvl = pPr.find(qn('w:outlineLvl'))
@@ -1111,8 +1146,10 @@ class WordProcessor:
             self._log(f"  > 警告：大纲级别 {level} 超出范围 (1-9)，已跳过设置")
             return None
         
-        # 读取原有大纲级别
+        # 读取原有大纲级别；正文级（9）视为未设置，避免日志出现 Lv10
         original_level = self._get_outline_level(para)
+        if original_level is not None and original_level >= 9:
+            original_level = None
         
         # 设置新的大纲级别 (Word内部用0-8表示1-9级)
         pPr = para._p.get_or_add_pPr()
@@ -1378,8 +1415,23 @@ class WordProcessor:
         return str(int(round(max(0.0, float(value)) * 100)))
 
     def _apply_line_spacing(self, para, pt_key, unit_key, multiple_key, default_pt, default_multiple=1.0):
+        self._apply_line_spacing_to_pPr(
+            para._p.get_or_add_pPr(),
+            pt_key,
+            unit_key,
+            multiple_key,
+            default_pt,
+            default_multiple,
+            paragraph_format=para.paragraph_format,
+        )
+
+    def _apply_line_spacing_to_pPr(
+        self, p_pr, pt_key, unit_key, multiple_key, default_pt,
+        default_multiple=1.0, paragraph_format=None,
+    ):
+        """把行距写进 pPr（段落或样式定义共用）。"""
         unit = self._normalize_spacing_unit(self.config.get(unit_key, 'pt'))
-        spacing = para._p.get_or_add_pPr().get_or_add_spacing()
+        spacing = p_pr.get_or_add_spacing()
         if unit == 'multiple':
             multiple = self._config_float(self.config, multiple_key, default_multiple)
             if multiple <= 0:
@@ -1390,7 +1442,8 @@ class WordProcessor:
 
         line_spacing_pt = self._config_float(self.config, pt_key, default_pt)
         if line_spacing_pt <= 0:
-            para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+            if paragraph_format is not None:
+                paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
             spacing.attrib.pop(qn('w:line'), None)
             return
         spacing.set(qn('w:line'), str(int(round(line_spacing_pt * 20))))
@@ -1897,7 +1950,7 @@ class WordProcessor:
 
     @classmethod
     def _paragraph_format_signature(cls, para):
-        """按字体、字号、加粗、斜体生成格式指纹（不含段落样式），信息不足返回 None。"""
+        """按字体、字号、加粗、斜体生成格式指纹，信息不足时回退到段落样式的定义。"""
         r_pr = None
         for run in para.runs:
             if run.text.strip():
@@ -1908,7 +1961,7 @@ class WordProcessor:
             if p_pr is not None:
                 r_pr = p_pr.find(qn('w:rPr'))
         if r_pr is None:
-            return None
+            return cls._style_format_signature(para)
 
         fonts = None
         r_fonts = r_pr.find(qn('w:rFonts'))
@@ -1920,6 +1973,43 @@ class WordProcessor:
         size = size_node.get(qn('w:val')) if size_node is not None else None
         bold = cls._flag_value(r_pr.find(qn('w:b')))
         italic = cls._flag_value(r_pr.find(qn('w:i')))
+        if fonts is None and size is None and bold is None and italic is None:
+            # 字体字号已交给标准样式统一时，用样式定义里的格式作为指纹
+            return cls._style_format_signature(para)
+        return (fonts, size, bold, italic)
+
+    @classmethod
+    def _style_format_signature(cls, para):
+        """取段落样式（含 basedOn 链）提供的格式指纹，样式也没有信息时返回 None。"""
+        try:
+            style = para.style
+        except Exception:  # noqa: BLE001 - 损坏的 pStyle 指向，按无信息处理
+            return None
+        fonts = size = bold = italic = None
+        seen = 0
+        while style is not None and seen < 6:
+            element = getattr(style, 'element', None)
+            r_pr = element.find(qn('w:rPr')) if element is not None else None
+            if r_pr is not None:
+                if fonts is None:
+                    r_fonts = r_pr.find(qn('w:rFonts'))
+                    if r_fonts is not None:
+                        fonts = tuple(
+                            r_fonts.get(qn(f'w:{attr}')) or ''
+                            for attr in ('ascii', 'eastAsia', 'hAnsi', 'cs')
+                        )
+                if size is None:
+                    size_node = r_pr.find(qn('w:sz'))
+                    if size_node is None:
+                        size_node = r_pr.find(qn('w:szCs'))
+                    if size_node is not None:
+                        size = size_node.get(qn('w:val'))
+                if bold is None:
+                    bold = cls._flag_value(r_pr.find(qn('w:b')))
+                if italic is None:
+                    italic = cls._flag_value(r_pr.find(qn('w:i')))
+            style = getattr(style, 'base_style', None)
+            seen += 1
         if fonts is None and size is None and bold is None and italic is None:
             return None
         return (fonts, size, bold, italic)
@@ -2000,6 +2090,54 @@ class WordProcessor:
         if RE_SECTION_TITLE.match(value):
             return 2 if self._outline_offset >= 2 else 1
         return None
+
+    def _paragraph_heading_rank(self, text_to_check):
+        """按编号/章节特征返回段落的大纲级别，非标题返回 0。
+
+        与逐段排版时 H1/H2/H3/H4/章/节 的识别顺序保持一致，仅用于判断
+        “末级编号标题其后是否还有正文”，不影响任何格式设置。
+        """
+        value = (text_to_check or '').lstrip()
+        chapter = self._chapter_section_level(value)
+        if chapter is not None:
+            return chapter
+        if RE_HEADING_H1.match(value):
+            return 1 + self._outline_offset
+        if RE_HEADING_H2.match(value):
+            return 2 + self._outline_offset
+        if RE_HEADING_H3.match(value):
+            return 3 + self._outline_offset
+        if RE_HEADING_H4.match(value):
+            return 4 + self._outline_offset
+        return 0
+
+    def _is_demoted_deepest_heading(self, block_idx):
+        """局部末级标题且局部范围内无正文时返回 True，该段落应降级为正文。
+
+        依赖 format_document 预计算的 self._demoted_body。
+        """
+        return self._demoted_body[block_idx]
+
+    def _format_demoted_deepest_as_body(self, para, protected_paragraphs, current_block_num, preview):
+        """把被判定为“末级且无后续正文”的标题段落按正文处理。
+
+        写入直接格式 w:outlineLvl=9（正文级）强制覆盖样式自带的大纲级别；
+        标题等级归并（normalize_heading_levels）在主循环之前运行，可能已给该段
+        设过大纲级别，这里同样覆盖为正文。加入 protected_paragraphs 可避免
+        随后的跳级补齐再次处理该段。
+        """
+        self._log(f"段落 {current_block_num}: 末级标题且其后无正文，按正文处理 - \"{preview}...\"")
+        self._strip_leading_whitespace(para)
+        ppr = para._p.get_or_add_pPr()
+        outline = ppr.find(qn('w:outlineLvl'))
+        if outline is None:
+            outline = OxmlElement('w:outlineLvl')
+            ppr.append(outline)
+        outline.set(qn('w:val'), '9')  # 9 = 正文级；直接格式覆盖样式
+        self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=self._apply_color)
+        self._apply_text_indent_and_align(para)
+        self._reset_pagination_properties(para)
+        protected_paragraphs.append(para._p)
 
     def _heading_font_for_level(self, level):
         """按最终大纲级别选择标题字体：1 级用一级标题字体、2 级用二级、其余按正文。"""
@@ -2242,6 +2380,8 @@ class WordProcessor:
         """读取段落当前生效的大纲级别（1-8）：先看直接设置，再看样式自带。"""
         raw_level = self._get_outline_level(para)
         if raw_level is not None:
+            if raw_level >= 9:  # 9 = 正文级；显式覆盖样式自带的大纲级别
+                return None
             level = raw_level + 1  # w:outlineLvl 以 0 表示一级
             if 1 <= level <= MAX_TITLE_OUTLINE_LEVEL:
                 return level
@@ -2348,6 +2488,378 @@ class WordProcessor:
         self._log(f"标题等级跳级检查完成：{detail}，共调整 {changed} 处。")
         return changed
 
+    # ------------------------------------------------------------------
+    # 标准样式统一：正文 / 标题 1~4
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _style_level_key(level):
+        """把大纲级别折算成样式等级：0 表示正文，1~4 表示标题 1~4。"""
+        if not level:
+            return 0
+        return min(int(level), MAX_STYLE_HEADING_LEVEL)
+
+    def _record_paragraph_level(self, para, level=None, strip=True):
+        """登记段落的最终等级，排版结束后统一套用内置样式。
+
+        strip=False 表示该段的字符格式不是单一等级（如二级标题与正文同段拆分），
+        此时只套样式、不清除直接字体字号，避免正文部分跟着标题样式变形。
+        """
+        self._level_records[id(para._p)] = (para, level, strip)
+
+    def _get_or_add_paragraph_style(self, doc, name, aliases=()):
+        """取内置段落样式（正文 / 标题 N），文档里没有时按内置样式补建。"""
+        wanted = {name.lower()}
+        wanted.update(alias.lower() for alias in aliases)
+        for style in doc.styles:
+            if (getattr(style, 'name', '') or '').strip().lower() in wanted:
+                return style
+        styles_element = doc.styles.element
+        element = styles_element.get_by_id(name.replace(' ', ''))
+        if element is not None and element.type == WD_STYLE_TYPE.PARAGRAPH:
+            return StyleFactory(element)
+        return doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH, builtin=True)
+
+    def _get_level_style(self, doc, level):
+        key = self._style_level_key(level)
+        name = BUILTIN_BODY_STYLE_NAME if key == 0 else BUILTIN_HEADING_STYLE_NAMES[key]
+        aliases = BUILTIN_BODY_STYLE_ALIASES if key == 0 else BUILTIN_HEADING_STYLE_ALIASES[key]
+        return self._get_or_add_paragraph_style(doc, name, aliases)
+
+    def _write_style_font(self, style, font_name, size_pt, bold):
+        """把字体、字号、加粗写进样式定义（覆盖内置样式自带的主题字体/主题色）。"""
+        element = style.element
+        r_pr = element.get_or_add_rPr()
+        r_fonts = r_pr.get_or_add_rFonts()
+        for attribute in STYLE_THEME_FONT_ATTRIBUTES:
+            r_fonts.attrib.pop(qn(attribute), None)
+        en_font = self._run_font_family(font_name)
+        r_fonts.set(qn('w:eastAsia'), font_name)
+        r_fonts.set(qn('w:ascii'), en_font)
+        r_fonts.set(qn('w:hAnsi'), en_font)
+        r_fonts.attrib.pop(qn('w:cs'), None)
+
+        style.font.size = Pt(size_pt)
+        size_value = str(int(round(float(size_pt) * 2)))
+        sz_node = r_pr.find(qn('w:sz'))
+        if sz_node is not None:
+            sz_cs = r_pr.find(qn('w:szCs'))
+            if sz_cs is None:
+                sz_cs = OxmlElement('w:szCs')
+                sz_node.addnext(sz_cs)
+            sz_cs.set(qn('w:val'), size_value)
+        style.font.bold = bool(bold)
+        style.font.italic = False
+        # 内置标题样式自带“复杂文种加粗/斜体”，一并去掉，避免同一段落里字重不一致
+        for tag in ('w:bCs', 'w:iCs'):
+            node = r_pr.find(qn(tag))
+            if node is not None:
+                r_pr.remove(node)
+        style.font.color.rgb = RGBColor(0, 0, 0)
+        color = r_pr.find(qn('w:color'))
+        if color is not None:
+            for attribute in STYLE_THEME_COLOR_ATTRIBUTES:
+                color.attrib.pop(qn(attribute), None)
+
+    def _define_level_style(self, style, level):
+        """按配置写全某一级的样式定义：字体字号加粗、行距、大纲级别。"""
+        if level:
+            font, size, bold = self._heading_font_for_level(level)
+        else:
+            font, size, bold = self.config['body_font'], self.config['body_size'], False
+        self._write_style_font(style, font, size, bold)
+
+        p_pr = style.element.get_or_add_pPr()
+        # 内置标题样式自带“与下段同页/段中不分页”，排版主流程会逐段关掉，这里保持一致
+        for tag in ('w:keepNext', 'w:keepLines'):
+            node = p_pr.find(qn(tag))
+            if node is not None:
+                p_pr.remove(node)
+        if level:
+            self._apply_line_spacing_to_pPr(
+                p_pr, 'line_spacing', 'line_spacing_unit', 'line_spacing_multiple', 28
+            )
+            # 标题段落一律段前段后 0，样式定义与逐段排版写入的直接格式保持一致
+            spacing = p_pr.get_or_add_spacing()
+            for tag in ('w:before', 'w:after', 'w:beforeLines', 'w:afterLines'):
+                spacing.set(qn(tag), '0')
+            spacing.set(qn('w:beforeAutospacing'), '0')
+            spacing.set(qn('w:afterAutospacing'), '0')
+        outline = p_pr.find(qn('w:outlineLvl'))
+        if not level or not self.config.get('set_outline', True):
+            if outline is not None:
+                p_pr.remove(outline)
+            return
+        if outline is None:
+            outline = OxmlElement('w:outlineLvl')
+            anchor = None
+            for tag in ('w:rPr', 'w:sectPr', 'w:pPrChange'):
+                anchor = p_pr.find(qn(tag))
+                if anchor is not None:
+                    break
+            if anchor is not None:
+                anchor.addprevious(outline)
+            else:
+                p_pr.append(outline)
+        outline.set(qn('w:val'), str(level - 1))
+
+    @staticmethod
+    def _assign_paragraph_style(para, style):
+        """把段落改成指定样式（只写 pStyle，不动其它直接格式）。"""
+        try:
+            current = para.style
+        except Exception:  # noqa: BLE001 - 损坏的 pStyle 指向，按未设置处理
+            current = None
+        if current is not None and getattr(current, 'style_id', None) == style.style_id:
+            return
+        para.style = style
+
+    @staticmethod
+    def _strip_direct_run_fonts(para):
+        """清掉段落里由样式统一提供的直接字体/字号，保留加粗、斜体、下划线、颜色。"""
+        for run in para.runs:
+            r_pr = run._r.find(qn('w:rPr'))
+            if r_pr is None:
+                continue
+            for tag in STYLE_DIRECT_RUN_TAGS:
+                child = r_pr.find(qn(tag))
+                if child is not None:
+                    r_pr.remove(child)
+
+    @classmethod
+    def _style_font_size_value(cls, style):
+        """读取样式（含 basedOn 链）上的 w:sz（半磅字符串），取不到返回 None。"""
+        seen = 0
+        while style is not None and seen < 6:
+            element = getattr(style, 'element', None)
+            r_pr = element.find(qn('w:rPr')) if element is not None else None
+            if r_pr is not None:
+                size = r_pr.find(qn('w:sz'))
+                if size is not None and size.get(qn('w:val')):
+                    return size.get(qn('w:val'))
+            style = getattr(style, 'base_style', None)
+            seen += 1
+        return None
+
+    @classmethod
+    def _style_font_attributes(cls, style):
+        """读取样式（含 basedOn 链）上的 rFonts 属性（含主题字体），取不到返回 None。"""
+        seen = 0
+        while style is not None and seen < 6:
+            element = getattr(style, 'element', None)
+            r_pr = element.find(qn('w:rPr')) if element is not None else None
+            if r_pr is not None:
+                r_fonts = r_pr.find(qn('w:rFonts'))
+                if r_fonts is not None and len(r_fonts.attrib):
+                    return dict(r_fonts.attrib)
+            style = getattr(style, 'base_style', None)
+            seen += 1
+        return None
+
+    @staticmethod
+    def _default_font_size_value(doc):
+        """读取 styles.xml 中 docDefaults 的默认字号（半磅字符串）。"""
+        r_pr = WordProcessor._default_run_properties(doc)
+        if r_pr is None:
+            return None
+        size = r_pr.find(qn('w:sz'))
+        return size.get(qn('w:val')) if size is not None else None
+
+    @staticmethod
+    def _default_font_attributes(doc):
+        """读取 styles.xml 中 docDefaults 的默认字体属性（可能是主题字体）。"""
+        r_pr = WordProcessor._default_run_properties(doc)
+        if r_pr is None:
+            return None
+        r_fonts = r_pr.find(qn('w:rFonts'))
+        if r_fonts is None or not len(r_fonts.attrib):
+            return None
+        return dict(r_fonts.attrib)
+
+    @staticmethod
+    def _default_run_properties(doc):
+        """取出 docDefaults 里的 rPr 元素。"""
+        doc_defaults = doc.styles.element.find(qn('w:docDefaults'))
+        if doc_defaults is None:
+            return None
+        r_pr_default = doc_defaults.find(qn('w:rPrDefault'))
+        if r_pr_default is None:
+            return None
+        return r_pr_default.find(qn('w:rPr'))
+
+    @staticmethod
+    def _set_paragraph_mark_size(para, size_value):
+        """给段落标记写直接字号，用于保持空行（空段落）高度不变。"""
+        p_pr = para._p.get_or_add_pPr()
+        mark_r_pr = p_pr.find(qn('w:rPr'))
+        if mark_r_pr is None:
+            mark_r_pr = OxmlElement('w:rPr')
+            anchor = None
+            for tag in ('w:sectPr', 'w:pPrChange'):
+                anchor = p_pr.find(qn(tag))
+                if anchor is not None:
+                    break
+            if anchor is not None:
+                anchor.addprevious(mark_r_pr)
+            else:
+                p_pr.append(mark_r_pr)
+        WordProcessor._write_size_nodes(mark_r_pr, size_value)
+
+    @staticmethod
+    def _write_size_nodes(r_pr, size_value):
+        """把字号写进 rPr（w:sz / w:szCs），按 schema 顺序插入。"""
+        if hasattr(r_pr, 'get_or_add_sz'):
+            size_node = r_pr.get_or_add_sz()
+        else:
+            size_node = r_pr.find(qn('w:sz'))
+            if size_node is None:
+                size_node = OxmlElement('w:sz')
+                r_pr.append(size_node)
+        size_node.set(qn('w:val'), str(size_value))
+        sz_cs = r_pr.find(qn('w:szCs'))
+        if sz_cs is None:
+            sz_cs = OxmlElement('w:szCs')
+            size_node.addnext(sz_cs)
+        sz_cs.set(qn('w:val'), str(size_value))
+
+    def _freeze_skipped_paragraph_sizes(self, doc, recorded_ids):
+        """改写「正文」样式前，把未参与排版的段落的生效字体字号固化成直接格式。
+
+        表格、页眉页脚、空行等段落不参与逐段排版，只会继承「正文」样式。不固化的话，
+        改完样式后这些内容会跟着「正文」一起变（例如表格文字突然变成正文字号），
+        而工具对表格的承诺是“不启用表格自动调整就不动表格”。
+        """
+        new_size = str(int(round(float(self.config['body_size']) * 2)))
+        new_font = self.config['body_font']
+        for para in self._iter_untouched_paragraphs(doc):
+            if id(para._p) in recorded_ids:
+                continue
+            try:
+                current_style = para.style
+            except Exception:  # noqa: BLE001 - 损坏的 pStyle 指向，按默认样式处理
+                current_style = None
+            old_size = self._style_font_size_value(current_style) or self._default_font_size_value(doc)
+            old_fonts = (
+                self._style_font_attributes(current_style)
+                or self._default_font_attributes(doc)
+            )
+            size_changed = bool(old_size) and old_size != new_size
+            font_changed = bool(old_fonts) and self._fonts_would_change(old_fonts, new_font)
+            if not size_changed and not font_changed:
+                continue
+            if not para.text.strip():
+                if size_changed:
+                    self._set_paragraph_mark_size(para, old_size)
+                continue
+            for run in para.runs:
+                r_pr = run._r.get_or_add_rPr()
+                r_fonts = r_pr.find(qn('w:rFonts'))
+                if font_changed and (
+                    r_fonts is None
+                    or not (r_fonts.get(qn('w:eastAsia')) or r_fonts.get(qn('w:eastAsiaTheme')))
+                ):
+                    if r_fonts is None:
+                        r_fonts = r_pr.get_or_add_rFonts()
+                    for attribute, value in old_fonts.items():
+                        r_fonts.set(attribute, value)
+                if size_changed and r_pr.find(qn('w:sz')) is None:
+                    self._set_run_direct_size(r_pr, old_size)
+
+    @staticmethod
+    def _fonts_would_change(old_fonts, new_font):
+        """未排版段落的原字体是否会因为改写「正文」样式而变化。"""
+        themed = any(
+            attribute in old_fonts
+            for attribute in (qn('w:eastAsiaTheme'), qn('w:asciiTheme'), qn('w:hAnsiTheme'))
+        )
+        if themed:
+            return True
+        current = old_fonts.get(qn('w:eastAsia')) or old_fonts.get(qn('w:ascii'))
+        return bool(current) and current != new_font
+
+    def _iter_untouched_paragraphs(self, doc):
+        """遍历所有不参与排版的段落：表格单元格（含嵌套）、页眉页脚。"""
+        for table in doc.tables:
+            yield from self._iter_table_paragraphs(table)
+        for section in doc.sections:
+            for container in (
+                section.header, section.footer,
+                section.first_page_header, section.first_page_footer,
+                section.even_page_header, section.even_page_footer,
+            ):
+                # 只看已定义的页眉页脚：访问未定义的会顺手创建页眉/页脚部件
+                if container.is_linked_to_previous:
+                    continue
+                for para in container.paragraphs:
+                    yield para
+        for para in doc.paragraphs:
+            if not para.text.strip():
+                yield para
+
+    def _iter_table_paragraphs(self, table):
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    yield para
+                for nested in cell.tables:
+                    yield from self._iter_table_paragraphs(nested)
+
+    @staticmethod
+    def _set_run_direct_size(r_pr, size_value):
+        """给 run 写直接字号（w:sz / w:szCs），保持其原有大小不随样式变化。"""
+        WordProcessor._write_size_nodes(r_pr, size_value)
+
+    def _apply_level_styles(self, doc):
+        """把「正文 / 标题 1~4」样式定义写对，并让同级段落统一套用同一套样式。
+
+        等级以排版结束时的最终结果为准（含等级合并、跳级补齐、末级降级），
+        字体、字号、加粗、行距写进样式定义，段落上只保留原文的加粗/斜体/下划线/颜色等
+        直接格式，这样同一个等级的段落共用一套标准样式，后续在 Word 里改样式即可整体同步。
+        """
+        records = self._level_records
+        self._level_records = {}
+        if not records:
+            return 0
+
+        resolved = []
+        for para, level, strip in records.values():
+            final_level = self._effective_outline_level(para)
+            if final_level is not None:
+                level = final_level
+            resolved.append((para, level, strip))
+        if not resolved:
+            return 0
+
+        self._log("\n正在用标准样式统一同一个等级的段落（正文 / 标题 1~4）...")
+        # 改写「正文」样式会影响所有继承它的未排版段落（表格、页眉页脚、空行），先固化它们的字体字号
+        self._freeze_skipped_paragraph_sizes(doc, set(records))
+
+        styles = {}
+        for _, level, _ in resolved:
+            key = self._style_level_key(level)
+            if key in styles:
+                continue
+            style = self._get_level_style(doc, level)
+            self._define_level_style(style, level)
+            styles[key] = style
+            self._log(f"  > 样式「{style.name}」：{level and f'大纲 Lv{level}' or '正文'}")
+
+        counts = Counter()
+        for para, level, strip in resolved:
+            style = styles.get(self._style_level_key(level))
+            if style is None:
+                continue
+            self._assign_paragraph_style(para, style)
+            if strip:
+                self._strip_direct_run_fonts(para)
+            counts[self._style_level_key(level)] += 1
+
+        detail = "，".join(
+            f"{'正文' if key == 0 else f'标题 {key}'} {counts[key]} 段"
+            for key in sorted(counts)
+        )
+        self._log(f"标准样式统一完成：{detail}。")
+        return sum(counts.values())
+
     def format_document(self, input_path, output_path):
         processing_path, is_from_txt = self.convert_to_docx(input_path)
         processing_path = self._preprocess_document(processing_path, is_from_txt)
@@ -2359,6 +2871,7 @@ class WordProcessor:
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
         
         apply_color = not is_from_txt
+        self._apply_color = apply_color
 
         if self.config.get('merge_broken_lines', False):
             self._log("正在合并等长断行（PDF 粘贴导致的换行）...")
@@ -2372,7 +2885,56 @@ class WordProcessor:
 
         all_blocks = list(self._iter_block_items(doc))
         processed_indices = set()
-        
+
+        # 预计算各段落的编号/章节标题层级，并对每个标题判断“局部末级且局部无正文”：
+        # 一个标题的局部范围是它之后到下一个同级或更高级标题为止；若该范围内
+        # 既没有更深的下级标题、也没有正文内容，说明它其实只是正文（不设大纲级别）。
+        heading_ranks = [
+            self._paragraph_heading_rank(block.text) if isinstance(block, Paragraph) else 0
+            for block in all_blocks
+        ]
+        total = len(all_blocks)
+        is_content = [False] * total  # 非标题的实体内容（正文段落、图片或表格）
+        for _i, _block in enumerate(all_blocks):
+            if heading_ranks[_i] != 0:
+                continue
+            if isinstance(_block, Paragraph):
+                is_content[_i] = (
+                    bool(_block.text.strip())
+                    or self._has_drawing_or_pict(_block)
+                    or self._has_embedded_object(_block)
+                )
+            else:
+                is_content[_i] = True  # 表格等非段落内容也算作该标题下的内容
+        # 前缀和：统计任意区间内的“更深标题数”和“正文内容数”。
+        prefix_heading = [0] * (total + 1)
+        prefix_content = [0] * (total + 1)
+        for _i in range(total):
+            prefix_heading[_i + 1] = prefix_heading[_i] + (1 if heading_ranks[_i] > 0 else 0)
+            prefix_content[_i + 1] = prefix_content[_i] + (1 if is_content[_i] else 0)
+        # 每个标题右侧最近的“同级或更高级标题”，即其局部范围的终点。
+        scope_end = [total] * total
+        _stack = []
+        for _i in range(total - 1, -1, -1):
+            _rank = heading_ranks[_i]
+            if _rank <= 0:
+                continue
+            while _stack and heading_ranks[_stack[-1]] > _rank:
+                _stack.pop()
+            scope_end[_i] = _stack[-1] if _stack else total
+            _stack.append(_i)
+        self._demoted_body = [False] * total
+        for _i in range(total):
+            if heading_ranks[_i] <= 0:
+                continue
+            _end = scope_end[_i]
+            # 局部范围内更深的下级标题数（非 0 说明它是父级标题，应保留）。
+            deeper = prefix_heading[_end] - prefix_heading[_i + 1]
+            # 局部范围内的正文内容数。
+            content = prefix_content[_end] - prefix_content[_i + 1]
+            if deeper == 0 and content == 0:
+                self._demoted_body[_i] = True
+
         if not is_from_txt:
             self._log("正在扫描图表标题...")
             for idx, block in enumerate(all_blocks):
@@ -2534,6 +3096,9 @@ class WordProcessor:
                 block_idx += 1
                 continue
 
+            # 默认按正文登记等级；标题分支会改写为对应等级，附件标识等特殊段落撤销登记
+            self._record_paragraph_level(para)
+
             original_text, text_to_check = para.text, para.text.lstrip()
             text_to_check_stripped = para.text.strip()
             leading_space_count = len(original_text) - len(text_to_check)
@@ -2560,6 +3125,8 @@ class WordProcessor:
 
             if is_attachment_enabled and is_attachment_candidate:
                 self._log(f"段落 {current_block_num}: 附件标识 - \"{para_text_preview}...\"")
+                # 附件标识有自己的字体和分页规则，不并入「正文/标题」标准样式
+                self._level_records.pop(id(para._p), None)
                 self._strip_leading_whitespace(para)
                 self._apply_font_to_runs(para, self.config['attachment_font'], self.config['attachment_size'], set_color=apply_color)
                 self._reset_pagination_properties(para)
@@ -2658,121 +3225,143 @@ class WordProcessor:
                 continue
             
             elif chapter_level is not None:
-                kind = "章" if chapter_level == 1 else "节"
-                self._log(f"段落 {current_block_num}: {kind}标题（大纲 Lv{chapter_level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, chapter_level)
-                font, size, bold = self._heading_font_for_level(chapter_level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    kind = "章" if chapter_level == 1 else "节"
+                    self._log(f"段落 {current_block_num}: {kind}标题（大纲 Lv{chapter_level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, chapter_level)
+                    font, size, bold = self._heading_font_for_level(chapter_level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
+                    self._record_paragraph_level(para, chapter_level)
 
             elif RE_HEADING_H1.match(text_to_check):
                 level = 1 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 一级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 一级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
+                    self._record_paragraph_level(para, level)
 
             elif RE_HEADING_H2.match(text_to_check):
                 level = 2 + self._outline_offset
-                head_font, head_size, head_bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 二级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                
-                parts = para.text.split('。', 1)
-                
-                if len(parts) == 2 and parts[1].strip():
-                    self._log("  > 检测到二级标题与正文在同一段落，执行段内格式拆分。")
-                    title_len = len(parts[0]) + 1
-                    
-                    original_runs = []
-                    for r in para.runs:
-                        original_runs.append({
-                            'text': r.text, 'bold': r.bold, 'italic': r.italic,
-                            'underline': r.underline, 'font_color': r.font.color.rgb
-                        })
-                    
-                    para.clear()
-
-                    char_count = 0
-                    for run_info in original_runs:
-                        run_text = run_info['text']
-                        run_end_pos = char_count + len(run_text)
-                        
-                        title_run, body_run, new_run = None, None, None
-
-                        if run_end_pos <= title_len:
-                            new_run = para.add_run(run_text)
-                            self._set_run_font(new_run, head_font, head_size, set_color=apply_color)
-                        
-                        elif char_count >= title_len:
-                            new_run = para.add_run(run_text)
-                            self._set_run_font(new_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-                        
-                        else:
-                            split_index = title_len - char_count
-                            title_part = run_text[:split_index]
-                            body_part = run_text[split_index:]
-                            
-                            if title_part:
-                                title_run = para.add_run(title_part)
-                                self._set_run_font(title_run, head_font, head_size, set_color=apply_color)
-                            if body_part:
-                                body_run = para.add_run(body_part)
-                                self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-
-                        runs_to_format = [r for r in [title_run, body_run] if r] or ([new_run] if new_run else [])
-                        for r in runs_to_format:
-                            if r:
-                                r.bold = run_info['bold']; r.italic = run_info['italic']
-                                r.underline = run_info['underline']
-                                if run_info['font_color']: r.font.color.rgb = run_info['font_color']
-
-                        char_count = run_end_pos
-
-                    self._format_heading(para, level)
-                    self._apply_bold_to_first_chars(para, title_len, head_bold)
-                    self._apply_text_indent_and_align(para)
-                    self._reset_pagination_properties(para)
-
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
                 else:
-                    match = RE_H2_INLINE_TITLE.match(text_to_check)
-                    if match and not (text_to_check.startswith('（') and text_to_check.strip().endswith('）')):
-                        self._log("  > 已将二级标题的括号统一为中文括号。")
-                        for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
-                    self._format_heading(para, level)
-                    self._apply_font_to_runs(para, head_font, head_size, set_color=apply_color)
-                    self._apply_bold_to_runs(para, head_bold)
-                    self._apply_text_indent_and_align(para)
-                    self._reset_pagination_properties(para)
+                    head_font, head_size, head_bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 二级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+
+                    parts = para.text.split('。', 1)
+
+                    if len(parts) == 2 and parts[1].strip():
+                        self._log("  > 检测到二级标题与正文在同一段落，执行段内格式拆分。")
+                        title_len = len(parts[0]) + 1
+
+                        original_runs = []
+                        for r in para.runs:
+                            original_runs.append({
+                                'text': r.text, 'bold': r.bold, 'italic': r.italic,
+                                'underline': r.underline, 'font_color': r.font.color.rgb
+                            })
+
+                        para.clear()
+
+                        char_count = 0
+                        for run_info in original_runs:
+                            run_text = run_info['text']
+                            run_end_pos = char_count + len(run_text)
+
+                            title_run, body_run, new_run = None, None, None
+
+                            if run_end_pos <= title_len:
+                                new_run = para.add_run(run_text)
+                                self._set_run_font(new_run, head_font, head_size, set_color=apply_color)
+
+                            elif char_count >= title_len:
+                                new_run = para.add_run(run_text)
+                                self._set_run_font(new_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+
+                            else:
+                                split_index = title_len - char_count
+                                title_part = run_text[:split_index]
+                                body_part = run_text[split_index:]
+
+                                if title_part:
+                                    title_run = para.add_run(title_part)
+                                    self._set_run_font(title_run, head_font, head_size, set_color=apply_color)
+                                if body_part:
+                                    body_run = para.add_run(body_part)
+                                    self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+
+                            runs_to_format = [r for r in [title_run, body_run] if r] or ([new_run] if new_run else [])
+                            for r in runs_to_format:
+                                if r:
+                                    r.bold = run_info['bold']; r.italic = run_info['italic']
+                                    r.underline = run_info['underline']
+                                    if run_info['font_color']: r.font.color.rgb = run_info['font_color']
+
+                            char_count = run_end_pos
+
+                        self._format_heading(para, level)
+                        self._apply_bold_to_first_chars(para, title_len, head_bold)
+                        self._apply_text_indent_and_align(para)
+                        self._reset_pagination_properties(para)
+                        # 标题与正文同段：保留段内各自的直接字体字号，只套样式
+                        self._record_paragraph_level(para, level, strip=False)
+
+                    else:
+                        match = RE_H2_INLINE_TITLE.match(text_to_check)
+                        if match and not (text_to_check.startswith('（') and text_to_check.strip().endswith('）')):
+                            self._log("  > 已将二级标题的括号统一为中文括号。")
+                            for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
+                        self._format_heading(para, level)
+                        self._apply_font_to_runs(para, head_font, head_size, set_color=apply_color)
+                        self._apply_bold_to_runs(para, head_bold)
+                        self._apply_text_indent_and_align(para)
+                        self._reset_pagination_properties(para)
+                        self._record_paragraph_level(para, level)
                     
             elif RE_HEADING_H3.match(text_to_check):
                 level = 3 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
+                    self._record_paragraph_level(para, level)
                 
             elif RE_HEADING_H4.match(text_to_check):
                 level = 4 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
+                    self._record_paragraph_level(para, level)
                 
             elif not is_from_txt:
                 para_alignment = self._get_paragraph_alignment(para)
@@ -2814,6 +3403,8 @@ class WordProcessor:
         if self.config.get('normalize_heading_levels', False) and outline_enabled:
             self._log("\n正在检查标题等级是否跳级...")
             self._compact_outline_levels(doc, exclude_elements=protected_paragraphs)
+
+        self._apply_level_styles(doc)
 
         self._apply_page_setup(doc, is_from_txt=is_from_txt)
         self._log("正在保存最终文档...")
