@@ -664,6 +664,224 @@ class HeadingLevelPlanTests(unittest.TestCase):
         self.assertEqual(WordProcessor._plan_level_compaction([]), {})
 
 
+class DeepestHeadingWithoutBodyTests(unittest.TestCase):
+    """所有默认标题层级（章/节、一、二、（一）、1.、（1））若其为末级且其后无正文，
+    都应降级为正文（不设置大纲级别）。"""
+
+    @staticmethod
+    def _outline_val(para):
+        ppr = para._p.find(qn('w:pPr'))
+        if ppr is None:
+            return None
+        ol = ppr.find(qn('w:outlineLvl'))
+        return None if ol is None else int(ol.get(qn('w:val')))
+
+    def test_deepest_numbered_heading_without_body_is_body(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("1. 标题甲")
+            doc.add_paragraph("正文内容甲")
+            doc.add_paragraph("1. 标题乙")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 三级标题（其后有正文）保持大纲级别 Lv3 -> val 2
+                self.assertEqual(self._outline_val(paras[0]), 2)
+                # 末级且其后无正文的编号标题按正文处理（val=9 正文级，覆盖样式）
+                self.assertEqual(self._outline_val(paras[2]), 9)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_deepest_numbered_heading_with_body_keeps_level(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("（1）末级标题")
+            doc.add_paragraph("末级标题之下的正文")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 末级标题其后仍有正文，保持四级大纲级别 Lv4 -> val 3
+                self.assertEqual(self._outline_val(paras[0]), 3)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_deepest_h1_without_body_is_body(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、标题甲")
+            doc.add_paragraph("正文甲")
+            doc.add_paragraph("二、标题乙")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 一级标题（其后有正文）保持大纲级别 Lv1 -> val 0
+                self.assertEqual(self._outline_val(paras[0]), 0)
+                # 末级一级标题且其后无正文，按正文处理（val=9）
+                self.assertEqual(self._outline_val(paras[2]), 9)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_deepest_h2_without_body_is_body(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、标题甲")
+            doc.add_paragraph("（一）二级标题乙")
+            doc.add_paragraph("正文乙")
+            doc.add_paragraph("（一）二级标题丙")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 二级标题（其后有正文）保持大纲级别 Lv2 -> val 1
+                self.assertEqual(self._outline_val(paras[1]), 1)
+                # 末级二级标题且其后无正文，按正文处理（val=9）
+                self.assertEqual(self._outline_val(paras[3]), 9)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_local_deepest_without_body_ignores_body_in_other_section(self):
+        # 「（一）乙」在自己的局部范围内（到下一个同级/更高级标题为止）没有正文，
+        # 即使文档后面别处有正文，也应视为正文。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、标题甲")
+            doc.add_paragraph("（一）乙")
+            doc.add_paragraph("二、标题丙")
+            doc.add_paragraph("（一）丁")
+            doc.add_paragraph("正文丁")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 一、标题甲 有下级标题（（一）乙），保留 Lv1 -> val 0
+                self.assertEqual(self._outline_val(paras[0]), 0)
+                # （一）乙 局部无正文 -> 正文（val=9）
+                self.assertEqual(self._outline_val(paras[1]), 9)
+                # 二、标题丙 有下级与正文，保留 Lv1 -> val 0
+                self.assertEqual(self._outline_val(paras[2]), 0)
+                # （一）丁 局部有正文，保留 Lv2 -> val 1
+                self.assertEqual(self._outline_val(paras[3]), 1)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_demoted_heading_overrides_existing_outline_level(self):
+        # 降级处理应把段落直接大纲级别覆盖为正文级（val=9），覆盖已有的 Lv3。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("1. 标题甲")
+            doc.add_paragraph("正文甲")
+            target = doc.add_paragraph("1. 标题乙")
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            processor._set_outline_level(target, 3)  # 预先写入 Lv3 -> val 2
+            doc.save(source)
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 末级且局部无正文：直接大纲级别被覆盖为正文级 val=9
+                self.assertEqual(self._outline_val(paras[2]), 9)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_demoted_heading_overrides_heading_style(self):
+        # 末级降级必须覆盖“样式自带”的大纲级别（例如段落套用 Heading 3 样式）。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("1. 标题甲")
+            doc.add_paragraph("正文甲")
+            doc.add_paragraph("1. 标题乙", style="Heading 3")
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 直接格式 val=9（正文级）覆盖 Heading 3 样式
+                self.assertEqual(self._outline_val(paras[2]), 9)
+                # 生效大纲级别为空（按正文）
+                self.assertIsNone(processor._effective_outline_level(paras[2]))
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_pure_heading_hierarchy_only_deepest_level_demoted(self):
+        # 纯标题、零正文：只把最末级别降为正文，上级标题因有更深下级而保留。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("一、总则")      # L1
+            doc.add_paragraph("（一）目的")    # L2
+            doc.add_paragraph("1. 子项甲")     # L3
+            doc.add_paragraph("1. 子项乙")     # L3
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                self.assertEqual(self._outline_val(paras[0]), 0)  # Lv1 保留
+                self.assertEqual(self._outline_val(paras[1]), 1)  # Lv2 保留
+                self.assertEqual(self._outline_val(paras[2]), 9)  # 最末级 -> 正文
+                self.assertEqual(self._outline_val(paras[3]), 9)  # 最末级 -> 正文
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_heading_before_image_paragraph_keeps_level(self):
+        # 标题后紧跟“只有图片、没有文字”的段落时，图片应算作该标题下的内容，标题保留。
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            doc.add_paragraph("1. 系统架构图")
+            image_para = doc.add_paragraph()
+            _add_drawing(image_para)
+            doc.save(source)
+
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                paras = Document(output).paragraphs
+                # 图片段落算作内容，标题保留 Lv3 -> val 2
+                self.assertEqual(self._outline_val(paras[0]), 2)
+            finally:
+                processor._cleanup_temp_files()
+
+
 class OptionalEnhancementIntegrationTests(unittest.TestCase):
     def test_optional_enhancements_apply_to_docx(self):
         with tempfile.TemporaryDirectory(prefix="wfp_enhance_test_") as tmpdir:

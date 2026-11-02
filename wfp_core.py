@@ -1091,7 +1091,7 @@ class WordProcessor:
     def _get_outline_level(self, para):
         """
         读取段落的当前大纲级别
-        返回: 0-8 表示级别1-9，None 表示未设置
+        返回: 0-8 表示级别1-9，9 表示正文级（显式覆盖样式），None 表示未设置
         """
         pPr = para._p.get_or_add_pPr()
         outlineLvl = pPr.find(qn('w:outlineLvl'))
@@ -1111,8 +1111,10 @@ class WordProcessor:
             self._log(f"  > 警告：大纲级别 {level} 超出范围 (1-9)，已跳过设置")
             return None
         
-        # 读取原有大纲级别
+        # 读取原有大纲级别；正文级（9）视为未设置，避免日志出现 Lv10
         original_level = self._get_outline_level(para)
+        if original_level is not None and original_level >= 9:
+            original_level = None
         
         # 设置新的大纲级别 (Word内部用0-8表示1-9级)
         pPr = para._p.get_or_add_pPr()
@@ -2001,6 +2003,54 @@ class WordProcessor:
             return 2 if self._outline_offset >= 2 else 1
         return None
 
+    def _paragraph_heading_rank(self, text_to_check):
+        """按编号/章节特征返回段落的大纲级别，非标题返回 0。
+
+        与逐段排版时 H1/H2/H3/H4/章/节 的识别顺序保持一致，仅用于判断
+        “末级编号标题其后是否还有正文”，不影响任何格式设置。
+        """
+        value = (text_to_check or '').lstrip()
+        chapter = self._chapter_section_level(value)
+        if chapter is not None:
+            return chapter
+        if RE_HEADING_H1.match(value):
+            return 1 + self._outline_offset
+        if RE_HEADING_H2.match(value):
+            return 2 + self._outline_offset
+        if RE_HEADING_H3.match(value):
+            return 3 + self._outline_offset
+        if RE_HEADING_H4.match(value):
+            return 4 + self._outline_offset
+        return 0
+
+    def _is_demoted_deepest_heading(self, block_idx):
+        """局部末级标题且局部范围内无正文时返回 True，该段落应降级为正文。
+
+        依赖 format_document 预计算的 self._demoted_body。
+        """
+        return self._demoted_body[block_idx]
+
+    def _format_demoted_deepest_as_body(self, para, protected_paragraphs, current_block_num, preview):
+        """把被判定为“末级且无后续正文”的标题段落按正文处理。
+
+        写入直接格式 w:outlineLvl=9（正文级）强制覆盖样式自带的大纲级别；
+        标题等级归并（normalize_heading_levels）在主循环之前运行，可能已给该段
+        设过大纲级别，这里同样覆盖为正文。加入 protected_paragraphs 可避免
+        随后的跳级补齐再次处理该段。
+        """
+        self._log(f"段落 {current_block_num}: 末级标题且其后无正文，按正文处理 - \"{preview}...\"")
+        self._strip_leading_whitespace(para)
+        ppr = para._p.get_or_add_pPr()
+        outline = ppr.find(qn('w:outlineLvl'))
+        if outline is None:
+            outline = OxmlElement('w:outlineLvl')
+            ppr.append(outline)
+        outline.set(qn('w:val'), '9')  # 9 = 正文级；直接格式覆盖样式
+        self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=self._apply_color)
+        self._apply_text_indent_and_align(para)
+        self._reset_pagination_properties(para)
+        protected_paragraphs.append(para._p)
+
     def _heading_font_for_level(self, level):
         """按最终大纲级别选择标题字体：1 级用一级标题字体、2 级用二级、其余按正文。"""
         if level <= 1:
@@ -2242,6 +2292,8 @@ class WordProcessor:
         """读取段落当前生效的大纲级别（1-8）：先看直接设置，再看样式自带。"""
         raw_level = self._get_outline_level(para)
         if raw_level is not None:
+            if raw_level >= 9:  # 9 = 正文级；显式覆盖样式自带的大纲级别
+                return None
             level = raw_level + 1  # w:outlineLvl 以 0 表示一级
             if 1 <= level <= MAX_TITLE_OUTLINE_LEVEL:
                 return level
@@ -2359,6 +2411,7 @@ class WordProcessor:
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
         
         apply_color = not is_from_txt
+        self._apply_color = apply_color
 
         if self.config.get('merge_broken_lines', False):
             self._log("正在合并等长断行（PDF 粘贴导致的换行）...")
@@ -2372,7 +2425,56 @@ class WordProcessor:
 
         all_blocks = list(self._iter_block_items(doc))
         processed_indices = set()
-        
+
+        # 预计算各段落的编号/章节标题层级，并对每个标题判断“局部末级且局部无正文”：
+        # 一个标题的局部范围是它之后到下一个同级或更高级标题为止；若该范围内
+        # 既没有更深的下级标题、也没有正文内容，说明它其实只是正文（不设大纲级别）。
+        heading_ranks = [
+            self._paragraph_heading_rank(block.text) if isinstance(block, Paragraph) else 0
+            for block in all_blocks
+        ]
+        total = len(all_blocks)
+        is_content = [False] * total  # 非标题的实体内容（正文段落、图片或表格）
+        for _i, _block in enumerate(all_blocks):
+            if heading_ranks[_i] != 0:
+                continue
+            if isinstance(_block, Paragraph):
+                is_content[_i] = (
+                    bool(_block.text.strip())
+                    or self._has_drawing_or_pict(_block)
+                    or self._has_embedded_object(_block)
+                )
+            else:
+                is_content[_i] = True  # 表格等非段落内容也算作该标题下的内容
+        # 前缀和：统计任意区间内的“更深标题数”和“正文内容数”。
+        prefix_heading = [0] * (total + 1)
+        prefix_content = [0] * (total + 1)
+        for _i in range(total):
+            prefix_heading[_i + 1] = prefix_heading[_i] + (1 if heading_ranks[_i] > 0 else 0)
+            prefix_content[_i + 1] = prefix_content[_i] + (1 if is_content[_i] else 0)
+        # 每个标题右侧最近的“同级或更高级标题”，即其局部范围的终点。
+        scope_end = [total] * total
+        _stack = []
+        for _i in range(total - 1, -1, -1):
+            _rank = heading_ranks[_i]
+            if _rank <= 0:
+                continue
+            while _stack and heading_ranks[_stack[-1]] > _rank:
+                _stack.pop()
+            scope_end[_i] = _stack[-1] if _stack else total
+            _stack.append(_i)
+        self._demoted_body = [False] * total
+        for _i in range(total):
+            if heading_ranks[_i] <= 0:
+                continue
+            _end = scope_end[_i]
+            # 局部范围内更深的下级标题数（非 0 说明它是父级标题，应保留）。
+            deeper = prefix_heading[_end] - prefix_heading[_i + 1]
+            # 局部范围内的正文内容数。
+            content = prefix_content[_end] - prefix_content[_i + 1]
+            if deeper == 0 and content == 0:
+                self._demoted_body[_i] = True
+
         if not is_from_txt:
             self._log("正在扫描图表标题...")
             for idx, block in enumerate(all_blocks):
@@ -2658,121 +2760,136 @@ class WordProcessor:
                 continue
             
             elif chapter_level is not None:
-                kind = "章" if chapter_level == 1 else "节"
-                self._log(f"段落 {current_block_num}: {kind}标题（大纲 Lv{chapter_level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, chapter_level)
-                font, size, bold = self._heading_font_for_level(chapter_level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    kind = "章" if chapter_level == 1 else "节"
+                    self._log(f"段落 {current_block_num}: {kind}标题（大纲 Lv{chapter_level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, chapter_level)
+                    font, size, bold = self._heading_font_for_level(chapter_level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
 
             elif RE_HEADING_H1.match(text_to_check):
                 level = 1 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 一级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 一级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
 
             elif RE_HEADING_H2.match(text_to_check):
                 level = 2 + self._outline_offset
-                head_font, head_size, head_bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 二级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                
-                parts = para.text.split('。', 1)
-                
-                if len(parts) == 2 and parts[1].strip():
-                    self._log("  > 检测到二级标题与正文在同一段落，执行段内格式拆分。")
-                    title_len = len(parts[0]) + 1
-                    
-                    original_runs = []
-                    for r in para.runs:
-                        original_runs.append({
-                            'text': r.text, 'bold': r.bold, 'italic': r.italic,
-                            'underline': r.underline, 'font_color': r.font.color.rgb
-                        })
-                    
-                    para.clear()
-
-                    char_count = 0
-                    for run_info in original_runs:
-                        run_text = run_info['text']
-                        run_end_pos = char_count + len(run_text)
-                        
-                        title_run, body_run, new_run = None, None, None
-
-                        if run_end_pos <= title_len:
-                            new_run = para.add_run(run_text)
-                            self._set_run_font(new_run, head_font, head_size, set_color=apply_color)
-                        
-                        elif char_count >= title_len:
-                            new_run = para.add_run(run_text)
-                            self._set_run_font(new_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-                        
-                        else:
-                            split_index = title_len - char_count
-                            title_part = run_text[:split_index]
-                            body_part = run_text[split_index:]
-                            
-                            if title_part:
-                                title_run = para.add_run(title_part)
-                                self._set_run_font(title_run, head_font, head_size, set_color=apply_color)
-                            if body_part:
-                                body_run = para.add_run(body_part)
-                                self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-
-                        runs_to_format = [r for r in [title_run, body_run] if r] or ([new_run] if new_run else [])
-                        for r in runs_to_format:
-                            if r:
-                                r.bold = run_info['bold']; r.italic = run_info['italic']
-                                r.underline = run_info['underline']
-                                if run_info['font_color']: r.font.color.rgb = run_info['font_color']
-
-                        char_count = run_end_pos
-
-                    self._format_heading(para, level)
-                    self._apply_bold_to_first_chars(para, title_len, head_bold)
-                    self._apply_text_indent_and_align(para)
-                    self._reset_pagination_properties(para)
-
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
                 else:
-                    match = RE_H2_INLINE_TITLE.match(text_to_check)
-                    if match and not (text_to_check.startswith('（') and text_to_check.strip().endswith('）')):
-                        self._log("  > 已将二级标题的括号统一为中文括号。")
-                        for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
-                    self._format_heading(para, level)
-                    self._apply_font_to_runs(para, head_font, head_size, set_color=apply_color)
-                    self._apply_bold_to_runs(para, head_bold)
-                    self._apply_text_indent_and_align(para)
-                    self._reset_pagination_properties(para)
+                    head_font, head_size, head_bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 二级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+
+                    parts = para.text.split('。', 1)
+
+                    if len(parts) == 2 and parts[1].strip():
+                        self._log("  > 检测到二级标题与正文在同一段落，执行段内格式拆分。")
+                        title_len = len(parts[0]) + 1
+
+                        original_runs = []
+                        for r in para.runs:
+                            original_runs.append({
+                                'text': r.text, 'bold': r.bold, 'italic': r.italic,
+                                'underline': r.underline, 'font_color': r.font.color.rgb
+                            })
+
+                        para.clear()
+
+                        char_count = 0
+                        for run_info in original_runs:
+                            run_text = run_info['text']
+                            run_end_pos = char_count + len(run_text)
+
+                            title_run, body_run, new_run = None, None, None
+
+                            if run_end_pos <= title_len:
+                                new_run = para.add_run(run_text)
+                                self._set_run_font(new_run, head_font, head_size, set_color=apply_color)
+
+                            elif char_count >= title_len:
+                                new_run = para.add_run(run_text)
+                                self._set_run_font(new_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+
+                            else:
+                                split_index = title_len - char_count
+                                title_part = run_text[:split_index]
+                                body_part = run_text[split_index:]
+
+                                if title_part:
+                                    title_run = para.add_run(title_part)
+                                    self._set_run_font(title_run, head_font, head_size, set_color=apply_color)
+                                if body_part:
+                                    body_run = para.add_run(body_part)
+                                    self._set_run_font(body_run, self.config['body_font'], self.config['body_size'], set_color=apply_color)
+
+                            runs_to_format = [r for r in [title_run, body_run] if r] or ([new_run] if new_run else [])
+                            for r in runs_to_format:
+                                if r:
+                                    r.bold = run_info['bold']; r.italic = run_info['italic']
+                                    r.underline = run_info['underline']
+                                    if run_info['font_color']: r.font.color.rgb = run_info['font_color']
+
+                            char_count = run_end_pos
+
+                        self._format_heading(para, level)
+                        self._apply_bold_to_first_chars(para, title_len, head_bold)
+                        self._apply_text_indent_and_align(para)
+                        self._reset_pagination_properties(para)
+
+                    else:
+                        match = RE_H2_INLINE_TITLE.match(text_to_check)
+                        if match and not (text_to_check.startswith('（') and text_to_check.strip().endswith('）')):
+                            self._log("  > 已将二级标题的括号统一为中文括号。")
+                            for r in para.runs: r.text = r.text.replace('(', '（', 1).replace(')', '）', 1)
+                        self._format_heading(para, level)
+                        self._apply_font_to_runs(para, head_font, head_size, set_color=apply_color)
+                        self._apply_bold_to_runs(para, head_bold)
+                        self._apply_text_indent_and_align(para)
+                        self._reset_pagination_properties(para)
                     
             elif RE_HEADING_H3.match(text_to_check):
                 level = 3 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
                 
             elif RE_HEADING_H4.match(text_to_check):
                 level = 4 + self._outline_offset
-                font, size, bold = self._heading_font_for_level(level)
-                self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                self._strip_leading_whitespace(para)
-                self._format_heading(para, level)
-                self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                self._apply_bold_to_runs(para, bold)
-                self._apply_text_indent_and_align(para)
-                self._reset_pagination_properties(para)
+                if self._is_demoted_deepest_heading(block_idx):
+                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                else:
+                    font, size, bold = self._heading_font_for_level(level)
+                    self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._strip_leading_whitespace(para)
+                    self._format_heading(para, level)
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
+                    self._apply_text_indent_and_align(para)
+                    self._reset_pagination_properties(para)
                 
             elif not is_from_txt:
                 para_alignment = self._get_paragraph_alignment(para)
