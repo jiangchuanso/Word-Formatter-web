@@ -400,6 +400,13 @@ class WordProcessor:
         self._dotted_base_level = 3
         # 文档是否确实使用多级点分编号（1.1/1.1.1 等），决定是否识别“裸单级编号”（如自动编号转出的 1标题）
         self._has_dotted_hierarchy = False
+        # 更深的点分编号（x.x / x.x.x）下游的单级编号，视为其下一级：
+        # {段落 XML 元素 id: 大纲级别}，由 _prepare_single_number_restart 预扫描。
+        # _single_number_levels 对应「1.」起头的连续编号，_paren_number_levels 对应「(1)」标号。
+        # _single_number_owners 持有元素代理，避免代理被回收后 id() 变化导致查不到。
+        self._single_number_levels = {}
+        self._paren_number_levels = {}
+        self._single_number_owners = []
         # 单独的末级标号（(1)/(a) 等无所属正文或下游标题）段落集合，按正文处理、不给等级标题
         self._non_heading_paras = set()
         # 逐段排版时登记的最终等级（key 为段落的 XML 元素 id），供排版结束后统一套用内置样式
@@ -2046,6 +2053,10 @@ class WordProcessor:
         编号段可以是字母或数字；多级编号要求段落整体像标题，避免把 "1.5 倍" 这类小数误判为标题。
         allow_single 为真（文档使用多级点分编号）时才识别裸单级编号（如自动编号转文字后的 “1标题”）。
         无法推断时返回 None；offset 为章/节带来的顺延级数。该识别优先于段落既有样式/格式。
+
+        「x.x.x 下游从 1 重新起头的连续编号」需要文档顺序上下文，由
+        _prepare_single_number_restart 单独判定为其下一级（见 _paragraph_dotted_level），
+        本函数只做不依赖上下文的纯文本深度推断。
         """
         value = (text or '').lstrip()
         offset = int(offset or 0)
@@ -2218,6 +2229,117 @@ class WordProcessor:
         if self._dotted_base_level == 1:
             self._log("文档以多级点分编号为主干大纲，点分编号按 1./1.1./1.1.1./1.1.1.1. → L1~L4 识别。")
 
+    def _single_number_label(self, text):
+        """段落开头的单级标号：返回 (序号, 是否带括号)，不是单级标号时返回 None。
+
+        「1.」/「1．」/裸「1内容」→ (1, False)；「(1)」/「（1）」→ (1, True)。
+        多级点分编号（1.1 等）与字母标号（A. / (a)）不参与本规则。
+        """
+        value = (text or '').lstrip()
+        if not value:
+            return None
+        parenthesized = re.match(r'^[（\(](\d+)[）\)]', value)
+        if parenthesized:
+            return int(parenthesized.group(1)), True
+        if RE_DOTTED_NUMBER.match(value):
+            return None
+        if not RE_HEADING_H3.match(value) and not (self._has_dotted_hierarchy and RE_SINGLE_LABEL.match(value)):
+            return None
+        digits = re.match(r'\d+', value)
+        return (int(digits.group(0)), False) if digits else None
+
+    def _sub_level_of_context(self, depth, restart_level):
+        """当前编号上下文的下一级：有起头的单级编号时取其后一级，否则按点分深度推算。"""
+        if restart_level is not None:
+            return min(restart_level + 1, MAX_TITLE_OUTLINE_LEVEL)
+        if depth >= 2:
+            return min(self._dotted_base_level + depth, MAX_TITLE_OUTLINE_LEVEL)
+        return None
+
+    def _prepare_single_number_restart(self, doc):
+        """多级点分编号下游的单级标号，按“当前层级的下一级”处理。
+
+        文档里更深的点分编号（x.x / x.x.x）之后出现的单级标号都不是新的一级标题，
+        而是该深层标题的子项：
+        - 「1.」/裸「1内容」：默认按基准级别识别（纯点分文档即一级标题）；只有序号从 1
+          重新起头并依次递增（1、2、3…）时才改判为下一级，避免把「1. 总则 …
+          2. 引用文件」这类顶层编号一起降级；
+        - 「(1)」/「（1）」：默认固定为四级，与上游层级无关；这里同样按“当前上下文的
+          下一级”处理（1.1 之后 → L3、1.1.1 之后 → L4…），避免子项比父项还浅。
+
+        文档开头的 1、2、3（前面没有更深的点分标题）不受影响；出现新的点分编号或
+        传统标题（一、/（一））时重新统计上下文。
+        """
+        self._single_number_levels = {}
+        self._paren_number_levels = {}
+        self._single_number_owners = []
+        if not self._has_dotted_hierarchy:
+            return
+        # 「1.」的下一级规则只在点分编号为主干时生效，保持公文三级标题约定不变
+        plain_enabled = self._dotted_base_level == 1
+        depth = 0              # 当前上下文中最近的点分编号段数
+        restart_level = None   # 当前“从 1 重新起头”序列的大纲级别
+        previous_value = None  # 该序列的上一序号
+        for para in doc.paragraphs:
+            text = (para.text or '').lstrip()
+            if not text:
+                continue
+            label = self._single_number_label(text)
+            if label is not None:
+                value, parenthesized = label
+                if parenthesized:
+                    level = self._sub_level_of_context(depth, restart_level)
+                    if level is not None:
+                        self._paren_number_levels[id(para._p)] = level
+                        self._single_number_owners.append(para._p)
+                    continue
+                if not plain_enabled:
+                    continue
+                level = None
+                if restart_level is not None and previous_value is not None and value > previous_value:
+                    level = restart_level
+                elif value == 1 and depth >= 2:
+                    restart_level = min(self._dotted_base_level + depth, MAX_TITLE_OUTLINE_LEVEL)
+                    level = restart_level
+                else:
+                    restart_level, previous_value = None, None
+                if level is not None:
+                    self._single_number_levels[id(para._p)] = level
+                    self._single_number_owners.append(para._p)
+                    previous_value = value
+                continue
+            if RE_HEADING_H1.match(text) or RE_HEADING_H2.match(text):
+                # 传统标题开启新的层级上下文
+                depth, restart_level, previous_value = 0, None, None
+                continue
+            para_depth = self._dotted_number_depth(text)
+            if para_depth >= 2 and self._looks_like_heading_text(text):
+                depth, restart_level, previous_value = para_depth, None, None
+        details = []
+        for name, mapping in (("「1.」起头连续编号", self._single_number_levels),
+                              ("「(1)」标号", self._paren_number_levels)):
+            if mapping:
+                levels = "、".join(f"Lv{level}" for level in sorted(set(mapping.values())))
+                details.append(f"{name} {len(mapping)} 段 → {levels}")
+        if details:
+            self._log("多级编号下游的单级编号按上一级的下一级处理：" + "；".join(details) + "。")
+
+    def _paragraph_dotted_level(self, para, text):
+        """段落按编号推断的大纲级别：「1 开头连续编号」的下一级映射优先于点分编号深度。"""
+        if para is not None:
+            override = self._single_number_levels.get(id(para._p))
+            if override is not None:
+                return override
+        return self._dotted_number_level(
+            text, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy
+        )
+
+    def _paren_number_level_of(self, para):
+        """「(1)」标号在多级编号下游的下一级级别；不适用时返回 None。"""
+        if para is None:
+            return None
+        return self._paren_number_levels.get(id(para._p))
+
     def _chapter_section_level(self, text):
         """识别章/节标题并返回绝对大纲级别（1/2）；不适用时返回 None。"""
         if not self._outline_offset:
@@ -2303,11 +2425,12 @@ class WordProcessor:
             new_p.append(element)
         return new_para
 
-    def _paragraph_heading_rank(self, text_to_check):
+    def _paragraph_heading_rank(self, text_to_check, para=None):
         """按编号/章节特征返回段落的大纲级别，非标题返回 0。
 
         与逐段排版时 H1/H2/H3/H4/章/节 的识别顺序保持一致，仅用于判断
         “末级编号标题其后是否还有正文”，不影响任何格式设置。
+        para 提供时，会采用 _prepare_single_number_restart 预扫描的下一级映射。
         """
         value = (text_to_check or '').lstrip()
         chapter = self._chapter_section_level(value)
@@ -2320,13 +2443,13 @@ class WordProcessor:
             return 1 + self._outline_offset
         if RE_HEADING_H2.match(value):
             return 2 + self._outline_offset
-        dotted = self._dotted_number_level(value, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)
+        dotted = self._paragraph_dotted_level(para, value)
         if dotted is not None:
             return dotted
         if RE_HEADING_H3.match(value):
             return 3 + self._outline_offset
         if RE_HEADING_H4.match(value) or RE_HEADING_H4_ALPHA.match(value):
-            return 4 + self._outline_offset
+            return self._paren_number_level_of(para) or (4 + self._outline_offset)
         return 0
 
     def _is_demoted_deepest_heading(self, block_idx):
@@ -2628,7 +2751,10 @@ class WordProcessor:
                 continue
 
             has_heading_style, style_level = self._get_heading_style_info(para)
-            numbered = self._numbered_heading_level(text, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)
+            # 「1.」起头连续编号 /「(1)」标号位于更深点分编号下游时，按上一级的下一级识别
+            numbered = self._single_number_levels.get(id(para._p)) or self._paren_number_level_of(para)
+            if numbered is None:
+                numbered = self._numbered_heading_level(text, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)
             numbered = numbered or self._chapter_section_level(text)
             outline_level = self._effective_outline_level(para)
             # 编号/层级识别优先于段落既有样式或大纲级别（格式），避免格式覆盖编号识别；
@@ -3213,6 +3339,7 @@ class WordProcessor:
 
         self._prepare_chapter_section_offset(doc)
         self._prepare_dotted_base(doc)
+        self._prepare_single_number_restart(doc)
 
         if self.config.get('convert_floating_objects', False):
             self._log("正在把浮动式对象转换为插入式...")
@@ -3232,7 +3359,7 @@ class WordProcessor:
         # 一个标题的局部范围是它之后到下一个同级或更高级标题为止；若该范围内
         # 既没有更深的下级标题、也没有正文内容，说明它其实只是正文（不设大纲级别）。
         heading_ranks = [
-            self._paragraph_heading_rank(block.text) if isinstance(block, Paragraph) else 0
+            self._paragraph_heading_rank(block.text, block) if isinstance(block, Paragraph) else 0
             for block in all_blocks
         ]
         total = len(all_blocks)
@@ -3476,7 +3603,7 @@ class WordProcessor:
                     self._log(f"  > 文字识别为二级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
                     self._apply_bold_to_runs(para, self.config.get('h2_bold', False))
-                elif (dotted_level := self._dotted_number_level(text_to_check, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)) is not None:
+                elif (dotted_level := self._paragraph_dotted_level(para, text_to_check)) is not None:
                     font, size, bold = self._heading_font_for_level(dotted_level)
                     self._log(f"  > 文字识别为多级编号标题(Lv{dotted_level}): \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, font, size, set_color=apply_color)
@@ -3746,7 +3873,7 @@ class WordProcessor:
                         self._reset_pagination_properties(para)
                         self._record_paragraph_level(para, level)
                     
-            elif ((dotted_level := self._dotted_number_level(text_to_check, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)) is not None
+            elif ((dotted_level := self._paragraph_dotted_level(para, text_to_check)) is not None
                     or (dotted_level := self._dotted_style_heading_level(para, text_to_check)) is not None):
                 level = dotted_level
                 if self._is_demoted_deepest_heading(block_idx):
@@ -3771,7 +3898,8 @@ class WordProcessor:
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
                 else:
-                    level = 4 + self._outline_offset
+                    # 位于多级编号下游时取“当前上下文的下一级”，否则仍按四级标题处理
+                    level = self._paren_number_level_of(para) or (4 + self._outline_offset)
                     if self._is_demoted_deepest_heading(block_idx):
                         self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
                     else:

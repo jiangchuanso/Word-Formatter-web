@@ -776,6 +776,76 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         self.assertEqual(self._outline_val(paras[2]), 2)   # 1 = L3
         self.assertEqual(self._outline_val(paras[3]), 3)   # 1.1 = L4
 
+    def test_single_number_restart_under_dotted_is_next_level(self):
+        # x.x.x 下游从 1 重新起头的连续编号（1./2.）应作为其下一级（L4），不得又提为一级标题
+        out = self._format(['1.1.1. 细节', '1. 第一步', '第一步正文。', '2. 第二步', '第二步正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 2)   # 1.1.1 → L3
+        self.assertEqual(self._outline_val(paras[1]), 3)   # 1. → L4
+        self.assertEqual(self._outline_val(paras[3]), 3)   # 2. → L4
+
+    def test_single_number_restart_under_two_level_dotted(self):
+        # x.x 下游（1.1 → L2）从 1 重新起头：按下一级 L3 处理
+        out = self._format(['1.1. 范围', '1. 子项甲', '子项甲正文。', '2. 子项乙', '子项乙正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[1]), 2)   # 1. → L3
+        self.assertEqual(self._outline_val(paras[3]), 2)   # 2. → L3
+
+    def test_top_level_sequence_after_dotted_stays_level1(self):
+        # 与上文 1. 连续的 2. 仍是主干大纲一级编号，不受“从 1 起头”规则影响
+        out = self._format(['1. 总则', '1.1. 范围', '正文甲。', '2. 引用文件', '正文乙。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 1. → L1
+        self.assertEqual(self._outline_val(paras[1]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[3]), 0)   # 2. → L1
+
+    def test_bare_single_number_restart_under_dotted(self):
+        # 自动编号转文字后的裸编号（1步骤）同样按上一级的下一级处理
+        out = self._format(['1总则', '1.1.1细节', '1步骤', '步骤正文。', '2步骤', '步骤正文。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals[:3], [0, 2, 3])
+        self.assertEqual(vals[4], 3)
+
+    def test_paren_number_under_dotted_is_next_level(self):
+        # （1）/（2）标号同样按“上一级的下一级”处理：1.1.1（L3）之后 → L4
+        out = self._format(['1.1.1. 细节', '（1）子项甲', '子项甲正文。', '（2）子项乙', '子项乙正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 2)   # 1.1.1 → L3
+        self.assertEqual(self._outline_val(paras[1]), 3)   # （1）→ L4
+        self.assertEqual(self._outline_val(paras[3]), 3)   # （2）→ L4
+
+    def test_paren_number_under_shallow_dotted_is_next_level(self):
+        # 1.1（L2）之后的（1）应为其下一级 L3，不再固定为四级
+        out = self._format(['1.1. 范围', '（1）子项甲', '子项甲正文。', '（2）子项乙', '子项乙正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[1]), 2)   # （1）→ L3
+        self.assertEqual(self._outline_val(paras[3]), 2)   # （2）→ L3
+
+    def test_paren_number_nested_under_single_number_list(self):
+        # “1. 起头”编号已占 L4 时，（1）作为其子项取 L5
+        out = self._format(['1.1.1. 细节', '1. 第一项', '第一项正文。',
+                            '（1）子项甲', '子项甲正文。', '2. 第二项', '第二项正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[1]), 3)   # 1. → L4
+        self.assertEqual(self._outline_val(paras[3]), 4)   # （1）→ L5
+        self.assertEqual(self._outline_val(paras[5]), 3)   # 2. → 回到 L4
+
+    def test_paren_number_under_traditional_dotted_heading(self):
+        # 传统标题体系下 1.1（L4）之后的（1）同样取下一级 L5
+        out = self._format(['一、总体要求', '1.1 子项', '（1）细项', '细项正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[1]), 3)   # 1.1 → L4
+        self.assertEqual(self._outline_val(paras[2]), 4)   # （1）→ L5
+
+    def test_paren_number_without_dotted_context_stays_level4(self):
+        # 没有多级编号上下文时，（1）仍按四级标题处理
+        out = self._format(['（1）甲项', '甲项正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 3)   # L4
+
     def test_decimal_in_body_not_heading(self):
         # 正文里的 “1.5 倍” 之类小数不应被误判为标题
         out = self._format(['1.5倍增长，这是正文内容，用来测试不会被误判为标题的情况，长度也足够长。', '另一段正文。'])
