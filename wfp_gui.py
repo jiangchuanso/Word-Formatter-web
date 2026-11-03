@@ -157,6 +157,8 @@ class WordFormatterGUI:
         self.use_builtin_styles_var = tk.BooleanVar(value=self.default_params.get('use_builtin_styles', True))
         self.detect_article_title_var = tk.BooleanVar(value=self.default_params.get('detect_article_title', True))
         self.merge_broken_lines_var = tk.BooleanVar(value=self.default_params.get('merge_broken_lines', False))
+        self.clear_unused_styles_var = tk.BooleanVar(value=self.default_params.get('clear_unused_styles', True))
+        self.remove_headers_footers_var = tk.BooleanVar(value=self.default_params.get('remove_headers_footers', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
         self.enable_table_var = tk.BooleanVar(value=self.default_params['enable_table_formatting'])
         self.table_auto_col_width_var = tk.BooleanVar(value=self.default_params['table_auto_col_width'])
@@ -774,6 +776,14 @@ class WordFormatterGUI:
         ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         ttk.Checkbutton(
+            advanced_frame, text="清除未使用的自定义样式", variable=self.clear_unused_styles_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="删除页眉页脚", variable=self.remove_headers_footers_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
             advanced_frame,
             text="自定义数字和字母字体",
             variable=self.use_custom_english_font_var,
@@ -936,6 +946,8 @@ class WordFormatterGUI:
         self.use_builtin_styles_var.set(loaded_config.get('use_builtin_styles', True))
         self.detect_article_title_var.set(loaded_config.get('detect_article_title', True))
         self.merge_broken_lines_var.set(loaded_config.get('merge_broken_lines', False))
+        self.clear_unused_styles_var.set(loaded_config.get('clear_unused_styles', True))
+        self.remove_headers_footers_var.set(loaded_config.get('remove_headers_footers', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
         self.enable_table_var.set(loaded_config.get('enable_table_formatting', False))
         self.table_auto_col_width_var.set(loaded_config.get('table_auto_col_width', True))
@@ -1015,6 +1027,8 @@ class WordFormatterGUI:
         config['use_builtin_styles'] = self.use_builtin_styles_var.get()
         config['detect_article_title'] = self.detect_article_title_var.get()
         config['merge_broken_lines'] = self.merge_broken_lines_var.get()
+        config['clear_unused_styles'] = self.clear_unused_styles_var.get()
+        config['remove_headers_footers'] = self.remove_headers_footers_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
         config['enable_table_formatting'] = self.enable_table_var.get()
         config['table_auto_col_width'] = self.table_auto_col_width_var.get()

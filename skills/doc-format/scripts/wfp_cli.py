@@ -109,6 +109,8 @@ CONFIG_DESCRIPTIONS = {
     "detect_chapter_section": ("章/节层级识别", "true/false，第X章=1级、第X节=2级，其后编号标题整体顺延"),
     "merge_broken_lines": ("等长断行合并", "true/false，把 PDF 粘贴造成的等长断行还原为整段"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
+    "clear_unused_styles": ("清除未使用自定义样式", "true/false，删除文档中未被引用的自定义（非内置）样式，默认开启"),
+    "remove_headers_footers": ("删除页眉页脚", "true/false，删除各节的页眉页脚内容（排版清洗默认开启）"),
     "table_header_font": ("表头字体", "enable_table_formatting 为 true 时生效"),
     "table_font": ("表格正文字体", "enable_table_formatting 为 true 时生效"),
     "table_size": ("表格字号", "pt"),
@@ -267,6 +269,14 @@ def apply_convenience_overrides(config, args):
         config["detect_article_title"] = True
     if getattr(args, "disable_detect_article_title", False):
         config["detect_article_title"] = False
+    if getattr(args, "clear_unused_styles", False):
+        config["clear_unused_styles"] = True
+    if getattr(args, "disable_clear_unused_styles", False):
+        config["clear_unused_styles"] = False
+    if getattr(args, "remove_headers_footers", False):
+        config["remove_headers_footers"] = True
+    if getattr(args, "disable_remove_headers_footers", False):
+        config["remove_headers_footers"] = False
     if getattr(args, "english_font", None):
         config["english_font"] = args.english_font
         config["use_custom_english_font"] = True
@@ -463,6 +473,8 @@ def show_config(args):
             "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
             "detect_chapter_section=true 第X章/第X节识别为 1/2 级标题，编号标题整体顺延",
             "merge_broken_lines=true 合并等长断行，还原 PDF 粘贴导致的段落断裂",
+            "clear_unused_styles=true 清除文档中未被引用的自定义（非内置）样式（默认开启）",
+            "remove_headers_footers=true 删除各节的页眉页脚内容",
         ],
         "config": {},
     }
@@ -527,6 +539,10 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-builtin-styles", action="store_true", help="关闭标准样式统一，改用逐段直接格式")
     parser.add_argument("--detect-article-title", action="store_true", help="识别“第X条”为条标题并在条后分段（默认开启）")
     parser.add_argument("--disable-detect-article-title", action="store_true", help="关闭条标题识别")
+    parser.add_argument("--clear-unused-styles", action="store_true", help="清除文档中未被引用的自定义（非内置）样式（默认开启）")
+    parser.add_argument("--disable-clear-unused-styles", action="store_true", help="关闭清除未使用样式")
+    parser.add_argument("--remove-headers-footers", action="store_true", help="删除各节的页眉页脚内容")
+    parser.add_argument("--disable-remove-headers-footers", action="store_true", help="关闭删除页眉页脚")
     parser.add_argument(
         "--preset", choices=sorted(PRESET_GROUPS),
         help="快捷配置组：format=公文格式排版，clean=排版清洗（在 --set 之前生效，可被后续参数覆盖）",

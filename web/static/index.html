@@ -356,7 +356,9 @@ function buildForm() {
       <label class="check"><input type="checkbox" data-key="convert_floating_objects" data-type="bool"> 浮动对象转插入式（图片/嵌入对象/表格改为随文字排布）</label>
       <label class="check"><input type="checkbox" data-key="media_single_line_spacing" data-type="bool"> 图片行改单倍行距（避免固定行距裁切图片）</label>
       <label class="check"><input type="checkbox" data-key="normalize_heading_levels" data-type="bool"> 标题等级合并与防跳级（需勾选自动设置大纲级别）</label>
-      <label class="check"><input type="checkbox" data-key="detect_chapter_section" data-type="bool"> 识别章/节层级（第X章=1级、第X节=2级，其后编号标题整体顺延）</label>
+      <label class="check"><input type="checkbox" data-key="detect_chapter_section" data-type="bool"> 识别章/节层级（第X章=1级、第X节=2级，并辅助判断标题等级）</label>
+      <label class="check"><input type="checkbox" data-key="clear_unused_styles" data-type="bool"> 清除未使用的自定义样式（删除文档中未被引用的自定义样式，默认开启）</label>
+      <label class="check"><input type="checkbox" data-key="remove_headers_footers" data-type="bool"> 删除页眉页脚（清除页眉页脚内容，排版清洗默认开启）</label>
     </div>
   </div>`);
 

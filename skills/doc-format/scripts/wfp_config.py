@@ -45,13 +45,17 @@ DEFAULT_CONFIG = {
     'table_header_bold': True, 'table_smart_align': False,
     'table_unified_borders': True, 'table_border_size_pt': 0.5,
     'table_col_min_pct': 8, 'table_col_max_pct': 45, 'table_short_text_len': 4,
+    'clear_unused_styles': True,  # 排版结束后清除文档中未被引用的自定义（非内置）样式
+    'remove_headers_footers': False,  # 排版清洗：删除页眉页脚内容
 }
 
 # 功能分类快捷配置：一键套用某一类功能及其推荐参数（Web / GUI 共用）
+# 两类开关各司其职：format = 公文格式排版（版式与体例），clean = 排版清洗（净化还原源文档）。
+# “识别章/节层级”在两类中都开启：公文排版用于确定层级字体，排版清洗用于辅助判断标题等级。
 PRESET_GROUPS = {
     'format': {
         'label': '公文格式排版',
-        'description': '字体字号、行距页边距、大纲层级、附件与表格',
+        'description': '页边距与 A4、标题/副标题/层级字体字号行距、大纲层级、附件与表格、标准样式统一',
         'values': {
             'force_a4': True,
             'margin_top': 3.7, 'margin_bottom': 3.5,
@@ -66,6 +70,7 @@ PRESET_GROUPS = {
             'figure_caption_font': '黑体', 'figure_caption_size': 14,
             'attachment_font': '黑体', 'attachment_size': 16,
             'set_outline': True,
+            'use_builtin_styles': True,
             'enable_attachment_formatting': True,
             'enable_table_formatting': True,
             'table_auto_col_width': True,
@@ -76,14 +81,16 @@ PRESET_GROUPS = {
     },
     'clean': {
         'label': '排版清洗',
-        'description': '符号标准化、断行合并、浮动对象、图片行距、章/节层级、标题等级',
+        'description': '符号标准化、断行合并、浮动对象、图片行距、标题等级合并、章/节层级辅助判断、清除未使用样式、删除页眉页脚、空行处理',
         'values': {
             'normalize_punctuation': True,
             'merge_broken_lines': True,
             'convert_floating_objects': True,
             'media_single_line_spacing': True,
-            'detect_chapter_section': True,
             'normalize_heading_levels': True,
+            'detect_chapter_section': True,  # 清洗时也用章/节层级辅助判断标题等级
+            'clear_unused_styles': True,
+            'remove_headers_footers': True,  # 清洗时删除页眉页脚
             'blank_line_mode': BLANK_LINE_MODE_DELETE_SINGLE,
         },
     },

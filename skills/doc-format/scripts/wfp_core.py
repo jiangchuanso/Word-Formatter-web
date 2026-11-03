@@ -87,8 +87,15 @@ RE_TITLE_H1 = re.compile(r'^' + CHINESE_NUM_PATTERN + r'\s*、')
 RE_TITLE_H2 = re.compile(r'^[（\(]' + CHINESE_NUM_PATTERN + r'[）\)]')
 RE_HEADING_H1 = re.compile(r'^[一二三四五六七八九十百千万零]+\s*、')
 RE_HEADING_H2 = re.compile(r'^[（\(][一二三四五六七八九十百千万零]+[）\)]')
-RE_HEADING_H3 = re.compile(r'^\d+\s*[\.．]')
+RE_HEADING_H3 = re.compile(r'^[0-9A-Za-z]+\s*[\.．](?=\s|[\u4e00-\u9fff]|$)')
 RE_HEADING_H4 = re.compile(r'^[（\(]\d+[）\)]')
+# 单独的字母序号：(a) / （a） / (A) 等，与 (1) 同属最末级标号
+RE_HEADING_H4_ALPHA = re.compile(r'^[（\(][a-zA-Z][）\)]')
+# 多级点分编号：每段可为数字或字母，至少一个点，末尾点可选。
+# 兼容 “1.1 标题”“1.1. 标题”“A.B 标题”“1.A 标题”以及自动编号转文字后无尾巴的 “1.1标题”。
+RE_DOTTED_NUMBER = re.compile(r'^([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)+)\.?')
+# 裸单级编号（无点）：1~3 位数字或单个字母，后接空白/中文/行尾；仅在点分编号为主干时启用。
+RE_SINGLE_LABEL = re.compile(r'^([0-9]{1,3}|[A-Za-z])(?=[\s\u4e00-\u9fff]|$)')
 RE_ATTACHMENT = re.compile(r'^附件\s*(\d+|[一二三四五六七八九十百千万零]+)?\s*[:：]?$')
 RE_H2_INLINE_TITLE = re.compile(r'^[（\(](.+?)[）\)](.*)', re.DOTALL)
 RE_HEADING_STYLE_NAME = re.compile(r'^(?:heading\s*\d+|标题\s*\d+)$', re.IGNORECASE)
@@ -388,6 +395,13 @@ class WordProcessor:
         self._outline_offset = 0
         # 条标题（第X条）的大纲级别，按章/节是否出现决定
         self._article_level = 1
+        # 点分编号「1.」的基准大纲级别：文档仅用点分多级编号且无传统标题时为 1（作为一级标题），
+        # 否则为 3（保持公文三级标题约定）。由 _prepare_dotted_base 按文档结构决定。
+        self._dotted_base_level = 3
+        # 文档是否确实使用多级点分编号（1.1/1.1.1 等），决定是否识别“裸单级编号”（如自动编号转出的 1标题）
+        self._has_dotted_hierarchy = False
+        # 单独的末级标号（(1)/(a) 等无所属正文或下游标题）段落集合，按正文处理、不给等级标题
+        self._non_heading_paras = set()
         # 逐段排版时登记的最终等级（key 为段落的 XML 元素 id），供排版结束后统一套用内置样式
         self._level_records = {}
         self.sys_temp_dir = tempfile.gettempdir()
@@ -2019,9 +2033,79 @@ class WordProcessor:
         return (fonts, size, bold, italic)
 
     @classmethod
-    def _numbered_heading_level(cls, text, offset=0):
-        """按编号特征推断的大纲级别，无法推断时返回 None；offset 为章/节带来的顺延级数。"""
+    def _dotted_number_level(cls, text, offset=0, base=3, allow_single=False):
+        """按点分编号深度推断大纲级别：同一文档内同一层级的级别固定，且下一层 = 上一层 + 1。
+
+        以 base 为第一层（单级编号）的基准层级：
+        - 单级编号（`1.` / `A.`，或点分编号为主干时的裸 `1` / `A`）→ base；
+        - 多级点分编号（`1.1` / `A.B` / `1.A` / `1.1.1` / `1.1.1.1`，末尾点可有可无）按段数逐级 +1：
+          1.→base、1.1→base+1、1.1.1→base+2、1.1.1.1→base+3（更深封顶 MAX_TITLE_OUTLINE_LEVEL）。
+
+        base 由文档结构决定（见 _prepare_dotted_base）：文档仅用点分多级编号且无传统标题（一、/（一）/章/节）
+        时 base=1（点分编号作为主干，1. 即一级标题）；否则 base=3（保持公文三级标题约定）。
+        编号段可以是字母或数字；多级编号要求段落整体像标题，避免把 "1.5 倍" 这类小数误判为标题。
+        allow_single 为真（文档使用多级点分编号）时才识别裸单级编号（如自动编号转文字后的 “1标题”）。
+        无法推断时返回 None；offset 为章/节带来的顺延级数。该识别优先于段落既有样式/格式。
+        """
         value = (text or '').lstrip()
+        offset = int(offset or 0)
+        multi = RE_DOTTED_NUMBER.match(value)
+        if multi:
+            if not cls._looks_like_heading_text(value):
+                return None
+            depth = multi.group(1).count('.') + 1
+            return min(base + (depth - 1) + offset, MAX_TITLE_OUTLINE_LEVEL)
+        # 单级编号 + 点（1. / A.）：保持原有三级标题约定，不加标题样判据
+        if RE_HEADING_H3.match(value):
+            return min(base + offset, MAX_TITLE_OUTLINE_LEVEL)
+        # 裸单级编号（无点，如 1标题 / A标题）：仅在文档确实使用多级点分编号时启用
+        if allow_single and RE_SINGLE_LABEL.match(value):
+            return min(base + offset, MAX_TITLE_OUTLINE_LEVEL)
+        return None
+
+    @classmethod
+    def _dotted_number_depth(cls, text):
+        """返回文本开头点分编号的段数（1.1 → 2、1.1.1 → 3），无多级点分编号时返回 0。"""
+        m = RE_DOTTED_NUMBER.match((text or '').lstrip())
+        return m.group(1).count('.') + 1 if m else 0
+
+    @classmethod
+    def _apply_dotted_level_floor(cls, text, level):
+        """多级点分编号（x.x）段落的大纲级别下限：级别不得浅于编号深度。
+
+        1.1 → 至少 Lv2、1.1.1 → 至少 Lv3、1.1.1.1 → 至少 Lv4（封顶 MAX_TITLE_OUTLINE_LEVEL）；
+        编号推导或自带大纲级别已比下限更深时保持不变；单级编号（1. / 1标题）与正文（None）不受影响。
+        """
+        if level is None:
+            return None
+        depth = cls._dotted_number_depth(text)
+        if depth >= 2:
+            floor = min(depth, MAX_TITLE_OUTLINE_LEVEL)
+            if level < floor:
+                return floor
+        return level
+
+    def _dotted_style_heading_level(self, para, text):
+        """以多级点分编号开头、文字不像标题、但自带大纲级别/标题样式的段落：
+        视为标题，级别取自带级别与编号深度下限中的较深者（1.1 → 至少 Lv2）。"""
+        if self._dotted_number_depth(text) < 2:
+            return None
+        outline_level = self._effective_outline_level(para)
+        if outline_level is None:
+            return None
+        return self._apply_dotted_level_floor(text, outline_level)
+
+    @classmethod
+    def _numbered_heading_level(cls, text, offset=0, base=3, allow_single=False):
+        """按编号特征推断的大纲级别，无法推断时返回 None；offset 为章/节带来的顺延级数，
+        base 为点分编号「1.」的基准层级，allow_single 见 _dotted_number_level。
+
+        点分多级编号（1./1.1./1.1.1./1.1.1.1.）按深度识别，优先于一、/（一）/1./（1）等单层编号。
+        """
+        value = (text or '').lstrip()
+        dotted = cls._dotted_number_level(value, offset, base, allow_single)
+        if dotted is not None:
+            return dotted
         level = None
         if RE_HEADING_H1.match(value):
             level = 1
@@ -2029,7 +2113,7 @@ class WordProcessor:
             level = 2
         elif RE_HEADING_H3.match(value):
             level = 3
-        elif RE_HEADING_H4.match(value):
+        elif RE_HEADING_H4.match(value) or RE_HEADING_H4_ALPHA.match(value):
             level = 4
         if level is None:
             return None
@@ -2105,6 +2189,34 @@ class WordProcessor:
             self._log(
                 f"检测到“第X条”条标题，条标题按 Lv{self._article_level} 处理，条后正文另起一段。"
             )
+
+    def _prepare_dotted_base(self, doc):
+        """按文档结构决定点分编号「1.」的基准大纲级别。
+
+        规则（结合结构判断，而非写死三级）：
+        - 文档使用了传统标题（一、/（一）/第X章/第X节）时，点分编号仍作为三级标题体系之下的层级，
+          「1.」基准为 3（1.→L3、1.1.→L4 …）；
+        - 文档【未】使用任何传统标题、且出现了带点的多级编号（1.1. / 1.1.1. 等，深度≥2）时，
+          点分编号本身构成文档的主干大纲，「1.」作为一级标题，基准为 1（1.→L1、1.1.→L2、1.1.1.→L3、1.1.1.1.→L4）；
+        - 其余（无传统标题、且只有扁平的 1./2. 列表）保持基准 3，沿用公文三级标题约定。
+        """
+        has_traditional = False
+        has_dotted_hierarchy = False
+        for para in doc.paragraphs:
+            t = (para.text or '').strip()
+            if not t:
+                continue
+            if (RE_HEADING_H1.match(t) or RE_HEADING_H2.match(t)
+                    or RE_CHAPTER_TITLE.match(t) or RE_SECTION_TITLE.match(t)):
+                has_traditional = True
+            m = RE_DOTTED_NUMBER.match(t)
+            # 只有像标题的多级编号才算主干大纲，避免正文里 "1.5 倍" 之类小数误触发 base=1
+            if m and m.group(1).count('.') >= 1 and self._looks_like_heading_text(t):
+                has_dotted_hierarchy = True
+        self._has_dotted_hierarchy = has_dotted_hierarchy
+        self._dotted_base_level = 1 if (not has_traditional and has_dotted_hierarchy) else 3
+        if self._dotted_base_level == 1:
+            self._log("文档以多级点分编号为主干大纲，点分编号按 1./1.1./1.1.1./1.1.1.1. → L1~L4 识别。")
 
     def _chapter_section_level(self, text):
         """识别章/节标题并返回绝对大纲级别（1/2）；不适用时返回 None。"""
@@ -2208,9 +2320,12 @@ class WordProcessor:
             return 1 + self._outline_offset
         if RE_HEADING_H2.match(value):
             return 2 + self._outline_offset
+        dotted = self._dotted_number_level(value, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)
+        if dotted is not None:
+            return dotted
         if RE_HEADING_H3.match(value):
             return 3 + self._outline_offset
-        if RE_HEADING_H4.match(value):
+        if RE_HEADING_H4.match(value) or RE_HEADING_H4_ALPHA.match(value):
             return 4 + self._outline_offset
         return 0
 
@@ -2466,6 +2581,7 @@ class WordProcessor:
                     level = fill_level
                     if level is None:
                         continue
+                level = WordProcessor._apply_dotted_level_floor(record.get('text'), level)
                 if record.get('level') != level:
                     plan[record['index']] = level
         return plan
@@ -2505,15 +2621,19 @@ class WordProcessor:
                 continue
             if self._has_drawing_or_pict(para) or self._has_embedded_object(para):
                 continue
+            if para._p in self._non_heading_paras:
+                continue  # 单独的 (1)/(a) 标号按正文处理，不参与标题等级归并
             signature = self._paragraph_format_signature(para)
             if signature is None:
                 continue
 
             has_heading_style, style_level = self._get_heading_style_info(para)
-            numbered = self._numbered_heading_level(text, self._outline_offset)
-            outline_level = self._effective_outline_level(para)
+            numbered = self._numbered_heading_level(text, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)
             numbered = numbered or self._chapter_section_level(text)
-            level = outline_level or numbered
+            outline_level = self._effective_outline_level(para)
+            # 编号/层级识别优先于段落既有样式或大纲级别（格式），避免格式覆盖编号识别；
+            # 多级点分编号（x.x）按编号深度给级别下限（1.1 → 至少 Lv2），自带级别更浅时上调
+            level = self._apply_dotted_level_floor(text, numbered or outline_level)
 
             if has_heading_style and level:
                 evidence = 3
@@ -2584,6 +2704,10 @@ class WordProcessor:
         for para, level in targets:
             new_level = mapping.get(level)
             if new_level is None or new_level == level:
+                continue
+            # 多级点分编号（x.x）补齐跳级后仍不得浅于编号深度（1.1 → 至少 Lv2）
+            new_level = self._apply_dotted_level_floor(para.text, new_level)
+            if new_level == level:
                 continue
             self._set_outline_level(para, new_level)
             changed += 1
@@ -2927,9 +3051,13 @@ class WordProcessor:
 
         resolved = []
         for para, level, strip in records.values():
-            final_level = self._effective_outline_level(para)
-            if final_level is not None:
-                level = final_level
+            # 编号/层级识别得到的登记等级（数字推导，优先于格式）已写入大纲级别，
+            # 此处以登记等级为准；仅当登记等级缺失（正文）时，才回退到既有样式的大纲级别。
+            if level is None:
+                fallback = self._effective_outline_level(para)
+                if fallback is not None:
+                    # 多级点分编号（x.x）按编号深度给级别下限，如 1.1 至少 Lv2
+                    level = self._apply_dotted_level_floor(para.text, fallback)
             resolved.append((para, level, strip))
         if not resolved:
             return 0
@@ -2965,6 +3093,107 @@ class WordProcessor:
         self._log(f"标准样式统一完成：{detail}。")
         return sum(counts.values())
 
+    def _clear_unused_custom_styles(self, doc):
+        """删除文档中未被引用的自定义（非内置）样式，返回被删除的样式名列表。
+
+        仅清除「自定义样式」，内置样式（正文 / 标题 1~4 等）始终保留；被引用的样式及其
+        基于链（basedOn）上的祖先样式一并保留，避免误删导致文档损坏。页眉页脚段落、
+        正文段落、表格、run 上的直接样式引用都会被纳入“已使用”统计。
+        """
+        used_ids = set()
+        used_names = set()
+
+        def _note(style):
+            if style is None:
+                return
+            try:
+                sid = style.style_id
+            except Exception:  # noqa: BLE001
+                return
+            if sid:
+                used_ids.add(sid)
+            name = getattr(style, 'name', None)
+            if name:
+                used_names.add(name)
+            # 把 basedOn 链上的祖先样式也标记为已使用，避免误删被继承的自定义样式
+            try:
+                base = getattr(style, 'base_style', None)
+            except Exception:  # noqa: BLE001
+                base = None
+            if base is not None:
+                _note(base)
+
+        for para in doc.paragraphs:
+            _note(self._safe_style(para))
+            for run in para.runs:
+                _note(self._safe_style(run))
+        for table in doc.tables:
+            _note(self._safe_style(table))
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        _note(self._safe_style(para))
+                        for run in para.runs:
+                            _note(self._safe_style(run))
+
+        removed = []
+        for style in list(doc.styles):
+            try:
+                if style.builtin:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                sid = style.style_id
+                name = getattr(style, 'name', None) or ''
+            except Exception:  # noqa: BLE001
+                continue
+            if sid in used_ids or name in used_names:
+                continue
+            try:
+                style_element = style._element
+                parent = style_element.getparent()
+                if parent is None:
+                    continue
+                parent.remove(style_element)
+                removed.append(name)
+            except Exception:  # noqa: BLE001
+                self._log(f"  > 清除自定义样式「{name}」失败，已跳过。")
+        return removed
+
+    @staticmethod
+    def _safe_style(target):
+        """安全读取段落/run/表格的样式对象，损坏或不可用时返回 None。"""
+        try:
+            return target.style
+        except Exception:  # noqa: BLE001 - 损坏的 pStyle / rStyle 指向
+            return None
+
+    def _remove_headers_footers(self, doc):
+        """删除所有节的页眉页脚内容（段落与表格），返回删除的元素数量。
+
+        仅处理本节独立定义的页眉页脚（is_linked_to_previous 为 False），与上一节共享的
+        页眉页脚不在此处删除，避免误改上游节的内容。
+        """
+        removed = 0
+        for section in doc.sections:
+            for container in (
+                section.header, section.footer,
+                section.first_page_header, section.first_page_footer,
+                section.even_page_header, section.even_page_footer,
+            ):
+                if container.is_linked_to_previous:
+                    continue
+                try:
+                    element = container._element
+                except Exception:  # noqa: BLE001
+                    continue
+                for child in list(element):
+                    if child.tag in (qn('w:p'), qn('w:tbl')):
+                        element.remove(child)
+                        removed += 1
+        return removed
+
     def format_document(self, input_path, output_path):
         processing_path, is_from_txt = self.convert_to_docx(input_path)
         processing_path = self._preprocess_document(processing_path, is_from_txt)
@@ -2983,6 +3212,7 @@ class WordProcessor:
             self._merge_broken_lines(doc)
 
         self._prepare_chapter_section_offset(doc)
+        self._prepare_dotted_base(doc)
 
         if self.config.get('convert_floating_objects', False):
             self._log("正在把浮动式对象转换为插入式...")
@@ -2990,6 +3220,7 @@ class WordProcessor:
 
         # 条标题：先把「第X条 正文……」拆成“条标题 + 正文”两段，再进入逐段排版
         self._level_records = {}
+        self._non_heading_paras = set()
         if self.config.get('detect_article_title', True):
             self._log("正在识别条标题（第X条）...")
             self._split_article_paragraphs(doc)
@@ -3017,6 +3248,54 @@ class WordProcessor:
                 )
             else:
                 is_content[_i] = True  # 表格等非段落内容也算作该标题下的内容
+
+        # 单独的末级标号（(1)/(a) 等）：若其后（跳过空段）既无所属正文、也没有真正的下游标题，
+        # 说明它只是列表标号而非结构标题，按正文处理、不给等级标题。
+        def _is_h4_label(text):
+            t = (text or '').lstrip()
+            return bool(RE_HEADING_H4.match(t) or RE_HEADING_H4_ALPHA.match(t))
+
+        _i = 0
+        while _i < total:
+            _blk = all_blocks[_i]
+            if not (isinstance(_blk, Paragraph) and _is_h4_label(_blk.text)):
+                _i += 1
+                continue
+            _run_end = _i
+            while _run_end < total:
+                _b = all_blocks[_run_end]
+                if isinstance(_b, Paragraph) and _is_h4_label(_b.text):
+                    _run_end += 1
+                else:
+                    break
+            # 该组之后的下一个“非空”块（跳过空段落）
+            _after = _run_end
+            while _after < total:
+                _b = all_blocks[_after]
+                if isinstance(_b, Paragraph):
+                    if _b.text.strip() or self._has_drawing_or_pict(_b) or self._has_embedded_object(_b):
+                        break
+                else:
+                    break  # 表格等非段落内容即视为正文
+                _after += 1
+            _has_support = False
+            if _after < total:
+                _b = all_blocks[_after]
+                if not isinstance(_b, Paragraph):
+                    _has_support = True  # 表格等算作正文
+                else:
+                    _btext = _b.text
+                    # 非 (1)/(a) 同类、且非空：正文或真正的下游标题都算“有支撑”
+                    if not _is_h4_label(_btext):
+                        _has_support = bool(_btext.strip()) or self._has_drawing_or_pict(_b) or self._has_embedded_object(_b)
+            if not _has_support:
+                for _k in range(_i, _run_end):
+                    if isinstance(all_blocks[_k], Paragraph):
+                        self._non_heading_paras.add(all_blocks[_k]._p)
+                        heading_ranks[_k] = 0
+                        is_content[_k] = bool(all_blocks[_k].text.strip())
+            _i = _run_end
+
         # 前缀和：统计任意区间内的“更深标题数”和“正文内容数”。
         prefix_heading = [0] * (total + 1)
         prefix_content = [0] * (total + 1)
@@ -3197,10 +3476,15 @@ class WordProcessor:
                     self._log(f"  > 文字识别为二级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['h2_font'], self.config['h2_size'], set_color=apply_color)
                     self._apply_bold_to_runs(para, self.config.get('h2_bold', False))
+                elif (dotted_level := self._dotted_number_level(text_to_check, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)) is not None:
+                    font, size, bold = self._heading_font_for_level(dotted_level)
+                    self._log(f"  > 文字识别为多级编号标题(Lv{dotted_level}): \"{para_text_preview}...\"")
+                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                    self._apply_bold_to_runs(para, bold)
                 elif RE_HEADING_H3.match(text_to_check):
                     self._log(f"  > 文字识别为三级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
-                elif RE_HEADING_H4.match(text_to_check):
+                elif RE_HEADING_H4.match(text_to_check) or RE_HEADING_H4_ALPHA.match(text_to_check):
                     self._log(f"  > 文字识别为四级标题: \"{para_text_preview}...\"")
                     self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
                 elif text_to_check:
@@ -3462,13 +3746,14 @@ class WordProcessor:
                         self._reset_pagination_properties(para)
                         self._record_paragraph_level(para, level)
                     
-            elif RE_HEADING_H3.match(text_to_check):
-                level = 3 + self._outline_offset
+            elif ((dotted_level := self._dotted_number_level(text_to_check, self._outline_offset, self._dotted_base_level, self._has_dotted_hierarchy)) is not None
+                    or (dotted_level := self._dotted_style_heading_level(para, text_to_check)) is not None):
+                level = dotted_level
                 if self._is_demoted_deepest_heading(block_idx):
                     self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
                 else:
                     font, size, bold = self._heading_font_for_level(level)
-                    self._log(f"段落 {current_block_num}: 三级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                    self._log(f"段落 {current_block_num}: 多级编号标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
                     self._strip_leading_whitespace(para)
                     self._format_heading(para, level)
                     self._apply_font_to_runs(para, font, size, set_color=apply_color)
@@ -3477,20 +3762,28 @@ class WordProcessor:
                     self._reset_pagination_properties(para)
                     self._record_paragraph_level(para, level)
                 
-            elif RE_HEADING_H4.match(text_to_check):
-                level = 4 + self._outline_offset
-                if self._is_demoted_deepest_heading(block_idx):
-                    self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
-                else:
-                    font, size, bold = self._heading_font_for_level(level)
-                    self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
-                    self._strip_leading_whitespace(para)
-                    self._format_heading(para, level)
-                    self._apply_font_to_runs(para, font, size, set_color=apply_color)
-                    self._apply_bold_to_runs(para, bold)
+
+            elif RE_HEADING_H4.match(text_to_check) or RE_HEADING_H4_ALPHA.match(text_to_check):
+                if para._p in self._non_heading_paras:
+                    # 单独的 (1)/(a) 标号，无所属正文或下游标题：按正文处理，不给等级标题
+                    self._log(f"段落 {current_block_num}: 单独末级标号按正文 - \"{para_text_preview}...\"")
+                    self._apply_font_to_runs(para, self.config['body_font'], self.config['body_size'], set_color=apply_color)
                     self._apply_text_indent_and_align(para)
                     self._reset_pagination_properties(para)
-                    self._record_paragraph_level(para, level)
+                else:
+                    level = 4 + self._outline_offset
+                    if self._is_demoted_deepest_heading(block_idx):
+                        self._format_demoted_deepest_as_body(para, protected_paragraphs, current_block_num, para_text_preview)
+                    else:
+                        font, size, bold = self._heading_font_for_level(level)
+                        self._log(f"段落 {current_block_num}: 四级标题（大纲 Lv{level}）- \"{para_text_preview}...\"")
+                        self._strip_leading_whitespace(para)
+                        self._format_heading(para, level)
+                        self._apply_font_to_runs(para, font, size, set_color=apply_color)
+                        self._apply_bold_to_runs(para, bold)
+                        self._apply_text_indent_and_align(para)
+                        self._reset_pagination_properties(para)
+                        self._record_paragraph_level(para, level)
                 
             elif not is_from_txt:
                 para_alignment = self._get_paragraph_alignment(para)
@@ -3539,5 +3832,16 @@ class WordProcessor:
             self._level_records = {}
 
         self._apply_page_setup(doc, is_from_txt=is_from_txt)
+
+        if self.config.get('remove_headers_footers', False):
+            removed_hf = self._remove_headers_footers(doc)
+            if removed_hf:
+                self._log(f"删除页眉页脚内容：{removed_hf} 处。")
+
+        if self.config.get('clear_unused_styles', True):
+            removed = self._clear_unused_custom_styles(doc)
+            if removed:
+                self._log(f"清除未使用的自定义样式：{len(removed)} 个（{', '.join(removed)}）。")
+
         self._log("正在保存最终文档...")
         doc.save(output_path)

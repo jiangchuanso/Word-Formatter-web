@@ -69,8 +69,12 @@ python scripts/wfp_cli.py test
 | `--disable-builtin-styles` | 开启 | 关闭标准样式统一，改用逐段直接格式 |
 | `--detect-article-title` | 开启 | 识别「第X条」为条标题，条后正文另起一段 |
 | `--disable-detect-article-title` | 开启 | 关闭条标题识别 |
+| `--clear-unused-styles` | 开启 | 清除文档中未被引用的自定义（非内置）样式 |
+| `--disable-clear-unused-styles` | 开启 | 关闭清除未使用样式 |
+| `--remove-headers-footers` | 关闭 | 删除各节的页眉页脚内容 |
+| `--disable-remove-headers-footers` | 关闭 | 关闭删除页眉页脚 |
 | `--preset format` | 无 | 快捷配置「公文格式排版」：页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别 |
-| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节识别、标题等级合并 |
+| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |

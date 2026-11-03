@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Pt
@@ -518,7 +519,12 @@ class HeadingLevelPlanTests(unittest.TestCase):
     def test_numbered_heading_level_detection(self):
         self.assertEqual(WordProcessor._numbered_heading_level('一、总体要求'), 1)
         self.assertEqual(WordProcessor._numbered_heading_level('（一）工作要求'), 2)
+        # 点分多级编号按深度识别（以三级标题为基准逐级延伸）：
+        # 1./1.1./1.1.1./1.1.1.1. → L3/L4/L5/L6
         self.assertEqual(WordProcessor._numbered_heading_level('1. 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1. 方法'), 4)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1. 方法'), 5)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1.1. 方法'), 6)
         self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
         self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
 
@@ -662,6 +668,216 @@ class HeadingLevelPlanTests(unittest.TestCase):
         self.assertEqual(WordProcessor._plan_level_compaction([4]), {})
         self.assertEqual(WordProcessor._plan_level_compaction([1, 3, 4, 6]), {3: 2, 4: 3, 6: 4})
         self.assertEqual(WordProcessor._plan_level_compaction([]), {})
+
+    def test_numbered_recognition_priority_over_format(self):
+        """点分编号识别应优先于段落既有样式/大纲级别（格式）。"""
+        doc = Document()
+        para = doc.add_paragraph('1.1.1. 三级条目')
+        # 段落带“标题 1”样式（格式=大纲 L1），但编号识别应为 L5（1.1.1. 深度3 -> L3+2），编号优先
+        para.style = doc.styles['Heading 1']
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+        processor._prepare_chapter_section_offset(doc)
+        records = processor._build_heading_records(doc)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['numbered_level'], 5)
+        self.assertEqual(records[0]['level'], 5)  # 编号优先于样式格式
+
+
+class ClearUnusedStylesTests(unittest.TestCase):
+    def test_clear_unused_custom_styles_removes_only_unused(self):
+        doc = Document()
+        used = doc.styles.add_style('UsedCustom', WD_STYLE_TYPE.PARAGRAPH)
+        unused = doc.styles.add_style('UnusedCustom', WD_STYLE_TYPE.PARAGRAPH)
+        doc.add_paragraph('正文段落').style = used
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+        removed = processor._clear_unused_custom_styles(doc)
+        names = [s.name for s in doc.styles]
+        self.assertIn('UsedCustom', names)
+        self.assertNotIn('UnusedCustom', names)
+        self.assertIn('UnusedCustom', removed)
+
+    def test_clear_unused_keeps_based_on_ancestor(self):
+        doc = Document()
+        parent = doc.styles.add_style('ParentCustom', WD_STYLE_TYPE.PARAGRAPH)
+        child = doc.styles.add_style('ChildCustom', WD_STYLE_TYPE.PARAGRAPH)
+        child.base_style = parent
+        doc.add_paragraph('正文段落').style = child  # 仅 child 被使用，parent 经 basedOn 链保留
+        processor = WordProcessor(DEFAULT_CONFIG.copy())
+        processor._clear_unused_custom_styles(doc)
+        names = [s.name for s in doc.styles]
+        self.assertIn('ChildCustom', names)
+        self.assertIn('ParentCustom', names)
+
+
+class StructuralHeadingLevelTests(unittest.TestCase):
+    """点分编号级别随文档结构变化；单独的 (1)/(a) 标号不给等级标题；清洗删除页眉页脚。"""
+
+    @staticmethod
+    def _outline_val(para):
+        ppr = para._p.find(qn('w:pPr'))
+        if ppr is None:
+            return None
+        ol = ppr.find(qn('w:outlineLvl'))
+        return None if ol is None else int(ol.get(qn('w:val')))
+
+    def _format(self, lines, config=None, add_header_footer=False):
+        with tempfile.TemporaryDirectory(prefix="wfp_struct_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            for line in lines:
+                doc.add_paragraph(line)
+            if add_header_footer:
+                section = doc.sections[0]
+                section.header.paragraphs[0].text = "原始页眉"
+                section.footer.paragraphs[0].text = "原始页脚"
+            doc.save(source)
+            processor = WordProcessor(config or DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                return Document(output)
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_pure_dotted_hierarchy_maps_to_levels(self):
+        # 无传统标题、仅有 1./1.1./1.1.1./1.1.1.1.：应作为主干大纲 1~4 级
+        out = self._format(['1. 总则', '1.1. 范围', '1.1.1. 细节', '1.1.1.1. 说明', '这是正文。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals[:4], [0, 1, 2, 3])  # L1~L4
+        self.assertIsNone(vals[4])  # 正文无等级
+
+    def test_dotted_under_traditional_heading_keeps_level3(self):
+        # 文档含“一、”传统标题时，1. 仍为三级标题（L3 -> val 2）
+        out = self._format(['一、总体要求', '正文甲', '1. 具体事项', '正文乙'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[2]), 2)   # 1. L3
+
+    def test_dotted_without_trailing_dot_auto_numbering(self):
+        # 自动编号转文字后形如 “1总则”“1.1范围”（无尾点、无分隔空格），每层级别固定且逐级 +1
+        out = self._format(['1总则', '1.1范围', '1.1.1细节', '1.1.1.1说明', '这是正文。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals[:4], [0, 1, 2, 3])
+        self.assertIsNone(vals[4])
+
+    def test_dotted_letter_numbering(self):
+        # 编号段可以是字母：A / A.1 / A.1.1 → L1/L2/L3
+        out = self._format(['A总则', 'A.1范围', 'A.1.1细节', '正文内容。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals[:3], [0, 1, 2])
+        self.assertIsNone(vals[3])
+
+    def test_dotted_no_dot_under_traditional_keeps_levels(self):
+        # 有传统标题时，无尾点的 1.1 仍按三级体系顺延：1.=L3、1.1=L4
+        out = self._format(['一、总体', '正文甲', '1事项', '1.1子项', '正文乙'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[2]), 2)   # 1 = L3
+        self.assertEqual(self._outline_val(paras[3]), 3)   # 1.1 = L4
+
+    def test_decimal_in_body_not_heading(self):
+        # 正文里的 “1.5 倍” 之类小数不应被误判为标题
+        out = self._format(['1.5倍增长，这是正文内容，用来测试不会被误判为标题的情况，长度也足够长。', '另一段正文。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals, [None, None])
+
+    def _format_doc(self, build, config=None):
+        with tempfile.TemporaryDirectory(prefix="wfp_struct_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            doc = Document()
+            build(doc)
+            doc.save(source)
+            processor = WordProcessor(config or DEFAULT_CONFIG.copy())
+            try:
+                processor.format_document(str(source), str(output))
+                return Document(output)
+            finally:
+                processor._cleanup_temp_files()
+
+    @staticmethod
+    def _set_direct_outline(para, level):
+        # 与 wfp_core._set_outline_level 相同手法写直接大纲级别（0 表示一级）
+        p_pr = para._p.get_or_add_pPr()
+        node = OxmlElement('w:outlineLvl')
+        node.set(qn('w:val'), str(level))
+        p_pr.append(node)
+
+    def test_dotted_with_shallow_heading_style_at_least_level2(self):
+        # 段落自带的 Word 大纲级别比标题2浅（如标题1）时，1.1 按编号深度至少判为 L2
+        def build(doc):
+            doc.add_paragraph('一、总体要求')
+            p = doc.add_paragraph('1.1 本条款说明总体目标与适用范围，并列举具体事项以便验证。')
+            p.style = doc.styles['Heading 1']
+            doc.add_paragraph('这是正文内容。')
+        out = self._format_doc(build)
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[1]), 1)   # 1.1 至少 L2
+
+    def test_dotted_with_direct_shallow_outline_at_least_level3(self):
+        # 直接大纲级别为一级时，1.1.1 按编号深度至少判为 L3
+        def build(doc):
+            doc.add_paragraph('一、总体要求')
+            p = doc.add_paragraph('1.1.1 本条款为更深层级的长说明文字，带有逗号与句号不属于标题形态。')
+            self._set_direct_outline(p, 0)
+            doc.add_paragraph('这是正文内容。')
+        out = self._format_doc(build)
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[1]), 2)   # 1.1.1 至少 L3
+
+    def test_dotted_keeps_deeper_own_outline(self):
+        # 自带大纲级别比编号深度下限更深时保持自带级别：1.1 + 标题4 → L4
+        def build(doc):
+            doc.add_paragraph('一、总体要求')
+            p = doc.add_paragraph('1.1 本条款说明总体目标与适用范围，并列举具体事项以便验证。')
+            p.style = doc.styles['Heading 4']
+            doc.add_paragraph('这是正文内容。')
+        out = self._format_doc(build)
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[1]), 3)   # 1.1 保持 L4
+
+    def test_dotted_without_outline_stays_body(self):
+        # 无大纲级别/标题样式的 x.x 长文本仍是正文，不受下限规则影响
+        def build(doc):
+            doc.add_paragraph('一、总体要求')
+            doc.add_paragraph('1.1 本条款说明总体目标与适用范围，并列举具体事项以便验证。')
+            doc.add_paragraph('这是正文内容。')
+        out = self._format_doc(build)
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertIsNone(self._outline_val(paras[1]))
+
+    def test_standalone_h4_label_is_body(self):
+        # 单独的 (1)/(2) 无所属正文或下游标题：按正文处理，不给等级标题
+        out = self._format(['（1）只有标号', '（2）也只有标号'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals, [None, None])
+
+    def test_h4_label_with_body_keeps_level(self):
+        # (1) 其后有正文：保持四级（L4 -> val 3）
+        out = self._format(['（1）有正文', '这是正文内容'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 3)
+
+    def test_alpha_label_standalone_is_body(self):
+        out = self._format(['(a) 单独标号'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals, [None])
+
+    def test_remove_headers_footers(self):
+        out = self._format(['正文内容'], add_header_footer=True,
+                           config=apply_preset(DEFAULT_CONFIG.copy(), 'clean'))
+        header_text = [p.text for s in out.sections for p in s.header.paragraphs if p.text.strip()]
+        footer_text = [p.text for s in out.sections for p in s.footer.paragraphs if p.text.strip()]
+        self.assertEqual(header_text, [])
+        self.assertEqual(footer_text, [])
+
+    def test_clean_preset_enables_chapter_section(self):
+        values = PRESET_GROUPS['clean']['values']
+        self.assertTrue(values.get('detect_chapter_section'))
+        self.assertTrue(values.get('remove_headers_footers'))
 
 
 class DeepestHeadingWithoutBodyTests(unittest.TestCase):
