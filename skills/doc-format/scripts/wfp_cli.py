@@ -10,17 +10,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP
+from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_GROUPS, apply_preset
 from wfp_core import (
     BLANK_LINE_MODE_OPTIONS,
-    LEGACY_FORMAT_KEYS,
     LegacyConversionUnavailable,
     SUPPORTED_FILE_EXTENSIONS,
     WordProcessor,
     WPSAppManager,
     _initialize_com_for_thread,
     _uninitialize_com_for_thread,
-    normalize_format_options,
 )
 from wfp_version import __version__
 
@@ -89,40 +87,30 @@ CONFIG_DESCRIPTIONS = {
     "subtitle_line_spacing": ("副标题行距", "磅；subtitle_line_spacing_unit=pt 时使用"),
     "subtitle_line_spacing_unit": ("副标题行距单位", "pt / multiple；默认 pt"),
     "subtitle_line_spacing_multiple": ("副标题行距倍数", "subtitle_line_spacing_unit=multiple 时使用，默认 1.0"),
-    "enable_title_after_blank_line": ("标题后空一行", "true/false，默认 false；已有空行不重复添加，与段落间距互斥"),
-    "enable_title_after_spacing": ("设置标题后段落间距", "true/false，默认 false；只作用于主文标题组末尾"),
-    "title_after_spacing": ("标题后间距", "非负数；不插入或删除空段落"),
-    "title_after_spacing_unit": ("标题后间距单位", "pt / lines，磅 / 行"),
-    "enable_attachment_title_after_blank_line": ("附件标题后空一行", "true/false，默认 false；仅附件正文，已有空行不重复添加"),
-    "enable_attachment_title_after_spacing": ("设置附件标题后段落间距", "true/false，默认 false；附件清单不应用"),
-    "attachment_title_after_spacing": ("附件标题后间距", "非负数；只作用于附件标题组末尾"),
-    "attachment_title_after_spacing_unit": ("附件标题后间距单位", "pt / lines，磅 / 行"),
-    "enable_signature_formatting": ("启用落款格式化", "true/false，默认 false；仅确认的单一机关署名与日期"),
-    "signature_layout": ("落款排法", "sealed / unsealed；盖章公文文字布局 / 不盖章布局，不添加或移动印章"),
-    "signature_include_attachments": ("同时处理附件正文落款", "true/false，默认 false；仅已确认附件正文"),
-    "signature_normalize_date": ("规范落款日期文字", "true/false，默认 false；有效日期转完整阿拉伯数字年月日，月日不补零"),
-    "signature_before_spacing_mode": ("落款段前间距模式", "auto / preserve / custom；按模式 / 保持原间距 / 自定义"),
-    "signature_before_spacing": ("落款自定义段前间距", "非负数，custom 时生效；不增删空段落"),
-    "signature_before_spacing_unit": ("落款段前间距单位", "pt / lines；Word 段落行单位，与国标一行30磅不同"),
     "left_indent_cm": ("段落左缩进", "厘米；paragraph_indent_unit=cm 时使用"),
     "right_indent_cm": ("段落右缩进", "厘米；paragraph_indent_unit=cm 时使用"),
     "paragraph_indent_unit": ("段落缩进单位", "cm / chars；默认 cm"),
     "left_indent_chars": ("段落左缩进", "字符；paragraph_indent_unit=chars 时使用"),
     "right_indent_chars": ("段落右缩进", "字符；paragraph_indent_unit=chars 时使用"),
     "first_line_indent_chars": ("首行缩进", "字符；默认 2"),
-    "title_bold": ("题目加粗", "preserve / bold / normal；保留原样 / 加粗 / 不加粗"),
-    "subtitle_bold": ("副标题加粗", "preserve / bold / normal"),
-    "h1_bold": ("一级标题加粗", "preserve / bold / normal；旧 true/false 对应 bold/preserve"),
-    "h2_bold": ("二级标题加粗", "preserve / bold / normal；只作用于标题部分"),
-    "attachment_bold": ("附件标识加粗", "preserve / bold / normal"),
+    "title_bold": ("题目加粗", "true 时强制题目加粗"),
+    "h1_bold": ("一级标题加粗", "true 时强制一级标题加粗"),
+    "h2_bold": ("二级标题加粗", "true 时强制二级标题加粗"),
     "set_outline": ("设置大纲级别", "true/false"),
-    "enable_attachment_formatting": ("附件格式化", "true/false；区分清单与正文，正文才强制分页；含糊的同段条目按清单保留并提示"),
+    "enable_attachment_formatting": ("附件格式化", "true/false"),
     "force_a4": ("强制 A4", "true/false"),
     "use_custom_english_font": ("单独设置数字和字母字体", "true/false"),
     "english_font": ("数字和字母字体", "默认 Times New Roman"),
     "blank_line_mode": ("TXT/MD 空行模式", "三选一：不改动、删除单空行、保留单空行"),
     "normalize_punctuation": ("符号标准化", "true/false，保守修复中英文标点混用"),
+    "convert_floating_objects": ("浮动对象转插入式", "true/false，浮动图片、嵌入对象和表格改为随文字排布"),
+    "media_single_line_spacing": ("图片行单倍行距", "true/false，含图片/嵌入对象的段落改为单倍行距"),
+    "normalize_heading_levels": ("标题等级合并优化", "true/false，同格式标题归并等级并补齐跳级，需开启 set_outline"),
+    "detect_chapter_section": ("章/节层级识别", "true/false，第X章=1级、第X节=2级，其后编号标题整体顺延"),
+    "merge_broken_lines": ("等长断行合并", "true/false，把 PDF 粘贴造成的等长断行还原为整段"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
+    "clear_unused_styles": ("清除未使用自定义样式", "true/false，删除文档中未被引用的自定义（非内置）样式，默认开启"),
+    "remove_headers_footers": ("删除页眉页脚", "true/false，删除各节的页眉页脚内容（排版清洗默认开启）"),
     "table_header_font": ("表头字体", "enable_table_formatting 为 true 时生效"),
     "table_font": ("表格正文字体", "enable_table_formatting 为 true 时生效"),
     "table_size": ("表格字号", "pt"),
@@ -132,12 +120,13 @@ CONFIG_DESCRIPTIONS = {
     "table_row_height_cm": ("表格行高", "厘米"),
     "table_auto_col_width": ("自动调整列宽", "true/false"),
     "table_width_percent": ("表格宽度", "百分比"),
-    "table_header_bold": ("表头加粗", "preserve / bold / normal；默认 bold"),
-    "table_alignment": ("表格整体位置", "preserve / left / center / right"),
-    "table_cell_alignment": ("单元格文字对齐", "preserve / smart / left / center / right"),
-    "table_remove_text_wrapping": ("取消表格文字环绕", "true/false；默认 false"),
-    "table_border_mode": ("表格边框", "preserve / unified；底纹始终保留"),
+    "table_header_bold": ("表头加粗", "true/false"),
+    "table_smart_align": ("表格智能对齐", "true/false"),
+    "table_unified_borders": ("统一表格边框", "true/false"),
     "table_border_size_pt": ("表格边框粗细", "pt"),
+    "table_col_min_pct": ("列宽下限", "百分比"),
+    "table_col_max_pct": ("列宽上限", "百分比"),
+    "table_short_text_len": ("短文本对齐字数", "字符数"),
 }
 
 
@@ -187,7 +176,7 @@ def load_json_file(path):
 
 
 def normalize_config(config):
-    config = normalize_format_options(config)
+    config = dict(config)
     if "blank_line_mode" not in config and "remove_blank_lines" in config:
         config["blank_line_mode"] = WordProcessor._normalize_blank_line_mode(
             None,
@@ -208,23 +197,23 @@ def normalize_config(config):
 
 def load_config(config_path=None, config_json=None):
     source = "内置默认配置"
-    config = {}
+    config = dict(DEFAULT_CONFIG)
 
     if config_path:
         path = Path(config_path).expanduser().resolve()
-        config.update(normalize_format_options(load_json_file(path)))
+        config.update(load_json_file(path))
         source = str(path)
     else:
         cwd_config = Path.cwd() / CONFIG_FILE_NAME
         if cwd_config.exists():
-            config.update(normalize_format_options(load_json_file(cwd_config)))
+            config.update(load_json_file(cwd_config))
             source = str(cwd_config.resolve())
 
     if config_json:
         inline_config = json.loads(config_json)
         if not isinstance(inline_config, dict):
             raise ValueError("--config-json 必须是 JSON 对象")
-        config.update(normalize_format_options(inline_config))
+        config.update(inline_config)
         source += " + --config-json"
 
     return normalize_config(config), source
@@ -238,9 +227,9 @@ def apply_set_overrides(config, set_items):
             raise ValueError(f"--set 参数必须使用 key=value 形式: {item}")
         key, raw_value = item.split("=", 1)
         key = key.strip()
-        if key not in DEFAULT_CONFIG and key not in LEGACY_FORMAT_KEYS:
+        if key not in DEFAULT_CONFIG:
             raise KeyError(f"未知配置项: {key}")
-        config.update(normalize_format_options({key: parse_value(raw_value)}))
+        config[key] = parse_value(raw_value)
 
 
 def apply_convenience_overrides(config, args):
@@ -252,6 +241,42 @@ def apply_convenience_overrides(config, args):
         config["use_custom_english_font"] = True
     if getattr(args, "disable_custom_english_font", False):
         config["use_custom_english_font"] = False
+    if getattr(args, "convert_floating_objects", False):
+        config["convert_floating_objects"] = True
+    if getattr(args, "disable_convert_floating_objects", False):
+        config["convert_floating_objects"] = False
+    if getattr(args, "media_single_line_spacing", False):
+        config["media_single_line_spacing"] = True
+    if getattr(args, "disable_media_single_line_spacing", False):
+        config["media_single_line_spacing"] = False
+    if getattr(args, "normalize_heading_levels", False):
+        config["normalize_heading_levels"] = True
+    if getattr(args, "disable_normalize_heading_levels", False):
+        config["normalize_heading_levels"] = False
+    if getattr(args, "detect_chapter_section", False):
+        config["detect_chapter_section"] = True
+    if getattr(args, "disable_detect_chapter_section", False):
+        config["detect_chapter_section"] = False
+    if getattr(args, "merge_broken_lines", False):
+        config["merge_broken_lines"] = True
+    if getattr(args, "disable_merge_broken_lines", False):
+        config["merge_broken_lines"] = False
+    if getattr(args, "use_builtin_styles", False):
+        config["use_builtin_styles"] = True
+    if getattr(args, "disable_builtin_styles", False):
+        config["use_builtin_styles"] = False
+    if getattr(args, "detect_article_title", False):
+        config["detect_article_title"] = True
+    if getattr(args, "disable_detect_article_title", False):
+        config["detect_article_title"] = False
+    if getattr(args, "clear_unused_styles", False):
+        config["clear_unused_styles"] = True
+    if getattr(args, "disable_clear_unused_styles", False):
+        config["clear_unused_styles"] = False
+    if getattr(args, "remove_headers_footers", False):
+        config["remove_headers_footers"] = True
+    if getattr(args, "disable_remove_headers_footers", False):
+        config["remove_headers_footers"] = False
     if getattr(args, "english_font", None):
         config["english_font"] = args.english_font
         config["use_custom_english_font"] = True
@@ -265,6 +290,10 @@ def apply_convenience_overrides(config, args):
 
 def load_config_with_overrides(args):
     config, source = load_config(getattr(args, "config", None), getattr(args, "config_json", None))
+    preset_name = getattr(args, "preset", None)
+    if preset_name:
+        config = apply_preset(config, preset_name)
+        source += f" + 快捷配置:{PRESET_GROUPS[preset_name]['label']}"
     apply_set_overrides(config, getattr(args, "set", None))
     apply_convenience_overrides(config, args)
     return normalize_config(config), source
@@ -309,13 +338,15 @@ def collect_records(paths, recursive=True):
 
 
 def formatted_relative_path(relative):
-    return relative.with_name(f"{relative.stem}_formatted.docx")
+    """输出沿用原文件名（只把扩展名换成 .docx），不再追加 _formatted 后缀。"""
+    return relative.with_name(f"{relative.stem}.docx")
 
 
-def unique_path(path, seen):
+def unique_path(path, seen, source=None):
+    """重名时追加序号；同时避开源文件本身，保证不覆盖原始文件。"""
     candidate = path
     counter = 2
-    while candidate in seen:
+    while candidate in seen or (source is not None and candidate == source):
         candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
         counter += 1
     seen.add(candidate)
@@ -329,11 +360,13 @@ def build_jobs(input_paths, output_arg, recursive=True):
     if len(records) == 1 and records[0].source.is_file():
         source = records[0].source
         if output_path is None:
-            output = source.with_name(f"{source.stem}_formatted.docx")
+            output = source.with_name(f"{source.stem}.docx")
         elif output_path.suffix.lower() == ".docx":
             output = output_path
         else:
-            output = output_path / f"{source.stem}_formatted.docx"
+            output = output_path / f"{source.stem}.docx"
+        if output == source:
+            output = unique_path(output, set(), source)
         return [Job(source, output)]
 
     if output_path is None:
@@ -350,8 +383,8 @@ def build_jobs(input_paths, output_arg, recursive=True):
     jobs = []
     seen = set()
     for record in records:
-        rel_output = unique_path(formatted_relative_path(record.relative), seen)
-        jobs.append(Job(record.source, output_dir / rel_output))
+        target = output_dir / formatted_relative_path(record.relative)
+        jobs.append(Job(record.source, unique_path(target, seen, record.source)))
     return jobs
 
 
@@ -361,7 +394,11 @@ def format_paths(args):
         input_paths.extend(args.inputs)
     input_paths.extend(args.paths or [])
 
-    config, config_source = load_config_with_overrides(args)
+    try:
+        config, config_source = load_config_with_overrides(args)
+    except Exception as exc:
+        print(f"配置加载失败: {exc}", file=sys.stderr)
+        return 1
     log = _stderr_log(args.verbose)
     if log:
         log(f"使用配置: {config_source}")
@@ -421,17 +458,23 @@ def show_config(args):
         "legacy_conversion": ".doc/.wps 在 Windows 优先使用 WPS/Word COM；macOS/Kylin/Linux 或 COM 失败时尝试 LibreOffice soffice；macOS/Kylin/Linux 未安装 LibreOffice 时会跳过旧格式文件。",
         "font_size_names": {str(key): value for key, value in FONT_SIZE_NAMES.items()},
         "blank_line_modes": BLANK_LINE_MODE_OPTIONS,
+        "preset_groups": {
+            key: {"label": group["label"], "description": group["description"],
+                  "values": group["values"]}
+            for key, group in PRESET_GROUPS.items()
+        },
         "optional_features": [
             "convert_auto_numbering=true 非 Windows 识别自动编号并转换为文字（默认开启，含表格；不支持的编号保留并记录警告）",
             "enable_table_formatting=true 启用表格内容自动调整",
-            "title_bold / subtitle_bold / h1_bold / h2_bold / attachment_bold / table_header_bold 支持 preserve、bold、normal",
-            "table_alignment 设置表格位置，table_cell_alignment 独立设置单元格文字对齐（支持 smart 智能对齐）",
-            "table_border_mode=preserve 保留原边框及底纹；table_remove_text_wrapping=true 取消表格文字环绕",
-            "enable_title_after_blank_line=true 在主文标题组末尾空一行，已有空行不重复；附件用 enable_attachment_title_after_blank_line，均默认关闭",
-            "enable_title_after_spacing=true 改用段落间距；空行模式优先，切换间距时将 enable_title_after_blank_line=false",
-            "enable_signature_formatting=true 启用单一机关落款排版；signature_layout=sealed/unsealed，日期规范化及附件落款另设开关，默认关闭",
             "use_custom_english_font=true 并设置 english_font，可单独指定数字和字母字体，默认 Times New Roman",
             "normalize_punctuation=true 启用符号标准化",
+            "convert_floating_objects=true 浮动式图片/嵌入对象/表格改为插入式",
+            "media_single_line_spacing=true 含图片/嵌入对象的段落改为单倍行距",
+            "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
+            "detect_chapter_section=true 第X章/第X节识别为 1/2 级标题，编号标题整体顺延",
+            "merge_broken_lines=true 合并等长断行，还原 PDF 粘贴导致的段落断裂",
+            "clear_unused_styles=true 清除文档中未被引用的自定义（非内置）样式（默认开启）",
+            "remove_headers_footers=true 删除各节的页眉页脚内容",
         ],
         "config": {},
     }
@@ -482,6 +525,28 @@ def add_config_override_args(parser):
     parser.add_argument("--english-font", help="数字和字母字体；设置后会自动启用 use_custom_english_font")
     parser.add_argument("--normalize-punctuation", action="store_true", help="启用符号标准化")
     parser.add_argument("--disable-normalize-punctuation", action="store_true", help="关闭符号标准化")
+    parser.add_argument("--convert-floating-objects", action="store_true", help="浮动式图片/嵌入对象/表格改为插入式")
+    parser.add_argument("--disable-convert-floating-objects", action="store_true", help="关闭浮动对象转插入式")
+    parser.add_argument("--media-single-line-spacing", action="store_true", help="含图片/嵌入对象的段落改为单倍行距")
+    parser.add_argument("--disable-media-single-line-spacing", action="store_true", help="关闭图片行单倍行距")
+    parser.add_argument("--normalize-heading-levels", action="store_true", help="合并相同格式标题等级并补齐跳级")
+    parser.add_argument("--disable-normalize-heading-levels", action="store_true", help="关闭标题等级合并优化")
+    parser.add_argument("--detect-chapter-section", action="store_true", help="把第X章/第X节识别为 1/2 级标题，其后编号标题整体顺延")
+    parser.add_argument("--disable-detect-chapter-section", action="store_true", help="关闭章/节层级识别")
+    parser.add_argument("--merge-broken-lines", action="store_true", help="合并等长断行（还原 PDF 粘贴导致的段落断裂）")
+    parser.add_argument("--disable-merge-broken-lines", action="store_true", help="关闭等长断行合并")
+    parser.add_argument("--use-builtin-styles", action="store_true", help="用内置标准样式（正文/标题 1~4）统一同级文字（默认开启）")
+    parser.add_argument("--disable-builtin-styles", action="store_true", help="关闭标准样式统一，改用逐段直接格式")
+    parser.add_argument("--detect-article-title", action="store_true", help="识别“第X条”为条标题并在条后分段（默认开启）")
+    parser.add_argument("--disable-detect-article-title", action="store_true", help="关闭条标题识别")
+    parser.add_argument("--clear-unused-styles", action="store_true", help="清除文档中未被引用的自定义（非内置）样式（默认开启）")
+    parser.add_argument("--disable-clear-unused-styles", action="store_true", help="关闭清除未使用样式")
+    parser.add_argument("--remove-headers-footers", action="store_true", help="删除各节的页眉页脚内容")
+    parser.add_argument("--disable-remove-headers-footers", action="store_true", help="关闭删除页眉页脚")
+    parser.add_argument(
+        "--preset", choices=sorted(PRESET_GROUPS),
+        help="快捷配置组：format=公文格式排版，clean=排版清洗（在 --set 之前生效，可被后续参数覆盖）",
+    )
 
 
 def build_parser():

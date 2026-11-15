@@ -55,6 +55,26 @@ python scripts/wfp_cli.py test
 | `--english-font <字体>` | `Times New Roman` | 设置数字和字母字体；使用后自动启用 `use_custom_english_font` |
 | `--normalize-punctuation` | 关闭 | 启用符号标准化 |
 | `--disable-normalize-punctuation` | 关闭 | 关闭符号标准化 |
+| `--convert-floating-objects` | 关闭 | 浮动式图片/嵌入对象/表格改为插入式 |
+| `--disable-convert-floating-objects` | 关闭 | 关闭浮动对象转插入式 |
+| `--media-single-line-spacing` | 关闭 | 含图片/嵌入对象的段落改为单倍行距 |
+| `--disable-media-single-line-spacing` | 关闭 | 关闭图片行单倍行距 |
+| `--normalize-heading-levels` | 关闭 | 合并相同格式标题等级并补齐跳级 |
+| `--disable-normalize-heading-levels` | 关闭 | 关闭标题等级合并优化 |
+| `--detect-chapter-section` | 关闭 | 第X章/第X节识别为 1/2 级，编号标题整体顺延 |
+| `--disable-detect-chapter-section` | 关闭 | 关闭章/节层级识别 |
+| `--merge-broken-lines` | 关闭 | 合并等长断行（还原 PDF 粘贴导致的段落断裂） |
+| `--disable-merge-broken-lines` | 关闭 | 关闭等长断行合并 |
+| `--use-builtin-styles` | 开启 | 用内置标准样式（正文/标题 1~4）统一同级文字 |
+| `--disable-builtin-styles` | 开启 | 关闭标准样式统一，改用逐段直接格式 |
+| `--detect-article-title` | 开启 | 识别「第X条」为条标题，条后正文另起一段 |
+| `--disable-detect-article-title` | 开启 | 关闭条标题识别 |
+| `--clear-unused-styles` | 开启 | 清除文档中未被引用的自定义（非内置）样式 |
+| `--disable-clear-unused-styles` | 开启 | 关闭清除未使用样式 |
+| `--remove-headers-footers` | 关闭 | 删除各节的页眉页脚内容 |
+| `--disable-remove-headers-footers` | 关闭 | 关闭删除页眉页脚 |
+| `--preset format` | 无 | 快捷配置「公文格式排版」：页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别 |
+| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |
@@ -127,6 +147,9 @@ python scripts/wfp_cli.py format -i old.doc --soffice /Applications/LibreOffice.
 # 启用增强功能后处理
 python scripts/wfp_cli.py format -i input.docx --enable-table-formatting --english-font "Times New Roman" --normalize-punctuation
 
+# 浮动图片转插入式 + 图片行单倍行距 + 标题等级合并
+python scripts/wfp_cli.py format -i input.docx --convert-floating-objects --media-single-line-spacing --normalize-heading-levels
+
 # 查看和导出配置
 python scripts/wfp_cli.py show-config
 python scripts/wfp_cli.py save-config --set body_font=宋体 --set body_size=12
@@ -148,6 +171,6 @@ python scripts/wfp_cli.py format -i input.docx -v
 
 - 成功时 stdout 每行打印一个输出 `.docx` 的绝对路径。
 - `-v/--verbose` 开启后，详细处理日志写入 stderr。
-- 单文件默认输出到同目录 `*_formatted.docx`。
+- 输出文件沿用源文件名，只把扩展名换成 `.docx`（不再追加 `_formatted`）；若与源文件同名（单文件且未指定 `-o`）或本次已有同名输出，会追加 `_2`、`_3` 等序号，绝不覆盖源文件。
 - 目录默认输出到 `<输入目录>_formatted/`，或用户指定的输出目录。
 - 退出码 `0` 表示没有失败；旧格式因缺少 LibreOffice 被跳过时会写入 stderr。非 `0` 表示没有找到可处理文件或至少一个文件失败。

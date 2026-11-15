@@ -89,11 +89,7 @@ except Exception:
     TkinterDnD = None
     TKDND_AVAILABLE = False
 
-from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_FONT_OPTIONS
-from wfp_gui_state import (
-    get_gui_state_path, load_gui_state, save_gui_state,
-    validate_output_dir, open_output_directory,
-)
+from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_FONT_OPTIONS, PRESET_GROUPS
 from wfp_core import (
     BLANK_LINE_MODE_DELETE_SINGLE,
     BLANK_LINE_MODE_KEEP_SINGLE,
@@ -106,7 +102,6 @@ from wfp_core import (
     WordProcessor,
     _initialize_com_for_thread,
     _uninitialize_com_for_thread,
-    normalize_format_options,
 )
 from wfp_version import APP_TITLE, __version__
 
@@ -129,9 +124,6 @@ UNIT_VALUE_SUFFIX = {
     'chars': '字符',
 }
 
-BOLD_LABELS = {'preserve': '保留原样', 'bold': '加粗', 'normal': '不加粗'}
-ALIGNMENT_LABELS = {'preserve': '保留原样', 'left': '左对齐', 'center': '居中', 'right': '右对齐'}
-
 class WordFormatterGUI:
     def __init__(self, master):
         self.master = master
@@ -143,10 +135,6 @@ class WordFormatterGUI:
         self._configure_window_geometry()
         self.log_queue = queue.Queue()
         self.is_processing = False
-        self.output_dir_var = tk.StringVar(master=master)
-        self.gui_state_path = get_gui_state_path()
-        self._saved_output_dir = ''
-        self.config_pages = {}
 
         self.font_size_map = FONT_SIZE_MAP.copy()
         self.font_size_map_rev = {v: k for k, v in self.font_size_map.items()}
@@ -162,27 +150,28 @@ class WordFormatterGUI:
         self.force_a4_var = tk.BooleanVar(value=self.default_params['force_a4'])
         self.use_custom_english_font_var = tk.BooleanVar(value=self.default_params['use_custom_english_font'])
         self.normalize_punctuation_var = tk.BooleanVar(value=self.default_params['normalize_punctuation'])
+        self.convert_floating_objects_var = tk.BooleanVar(value=self.default_params.get('convert_floating_objects', False))
+        self.media_single_line_spacing_var = tk.BooleanVar(value=self.default_params.get('media_single_line_spacing', False))
+        self.normalize_heading_levels_var = tk.BooleanVar(value=self.default_params.get('normalize_heading_levels', False))
+        self.detect_chapter_section_var = tk.BooleanVar(value=self.default_params.get('detect_chapter_section', False))
+        self.use_builtin_styles_var = tk.BooleanVar(value=self.default_params.get('use_builtin_styles', True))
+        self.detect_article_title_var = tk.BooleanVar(value=self.default_params.get('detect_article_title', True))
+        self.merge_broken_lines_var = tk.BooleanVar(value=self.default_params.get('merge_broken_lines', False))
+        self.clear_unused_styles_var = tk.BooleanVar(value=self.default_params.get('clear_unused_styles', True))
+        self.remove_headers_footers_var = tk.BooleanVar(value=self.default_params.get('remove_headers_footers', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
         self.enable_table_var = tk.BooleanVar(value=self.default_params['enable_table_formatting'])
         self.table_auto_col_width_var = tk.BooleanVar(value=self.default_params['table_auto_col_width'])
-        self.table_remove_wrapping_var = tk.BooleanVar(value=self.default_params['table_remove_text_wrapping'])
-        self.enable_title_after_spacing_var = tk.BooleanVar(value=False)
-        self.enable_attachment_title_after_spacing_var = tk.BooleanVar(value=False)
-        self.title_after_mode_var = tk.StringVar(value='空一行')
-        self.attachment_after_mode_var = tk.StringVar(value='空一行')
-        self.title_after_mode_widgets = []
-        self.attachment_after_mode_widgets = []
-        self.enable_signature_var = tk.BooleanVar(value=False)
-        self.signature_include_attachments_var = tk.BooleanVar(value=False)
-        self.signature_normalize_date_var = tk.BooleanVar(value=False)
+        self.table_header_bold_var = tk.BooleanVar(value=self.default_params['table_header_bold'])
+        self.table_smart_align_var = tk.BooleanVar(value=self.default_params['table_smart_align'])
+        self.table_unified_borders_var = tk.BooleanVar(value=self.default_params['table_unified_borders'])
+        self.title_bold_var = tk.BooleanVar(value=self.default_params.get('title_bold', False))
+        self.h1_bold_var = tk.BooleanVar(value=self.default_params.get('h1_bold', False))
+        self.h2_bold_var = tk.BooleanVar(value=self.default_params.get('h2_bold', False))
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_text_var = tk.StringVar(value="")
         self.entries = {}
         self.attachment_option_widgets = []
-        self.title_after_spacing_widgets = []
-        self.attachment_after_spacing_widgets = []
-        self.signature_option_widgets = []
-        self.signature_spacing_widgets = []
         self.table_option_widgets = []
         self.spacing_controls = []
         self.indent_controls = []
@@ -193,7 +182,6 @@ class WordFormatterGUI:
         self.create_menu()
         self.create_widgets()
         self.load_initial_config()
-        self._load_gui_state()
 
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
         self.master.after(250, self.set_initial_pane_position)
@@ -276,7 +264,7 @@ class WordFormatterGUI:
         for widget in widgets:
             if not hasattr(widget, '_enabled_state'):
                 try:
-                    enabled_state = str(widget.cget('state')) or 'normal'
+                    enabled_state = widget.cget('state') or 'normal'
                     widget._enabled_state = 'normal' if enabled_state == 'disabled' else enabled_state
                 except tk.TclError:
                     widget._enabled_state = 'normal'
@@ -287,31 +275,9 @@ class WordFormatterGUI:
 
     def _update_attachment_state(self):
         self._set_widgets_enabled(self.attachment_option_widgets, self.enable_attachment_var.get())
-        self._update_title_after_spacing_state()
-
-    def _update_title_after_spacing_state(self):
-        enabled = self.enable_title_after_spacing_var.get()
-        attachment_enabled = self.enable_attachment_var.get() and self.enable_attachment_title_after_spacing_var.get()
-        self._set_widgets_enabled(self.title_after_mode_widgets, enabled)
-        self._set_widgets_enabled(self.attachment_after_mode_widgets, attachment_enabled)
-        self._set_widgets_enabled(self.title_after_spacing_widgets,
-                                  enabled and self.title_after_mode_var.get() == '段落间距')
-        self._set_widgets_enabled(self.attachment_after_spacing_widgets,
-                                  attachment_enabled and self.attachment_after_mode_var.get() == '段落间距')
 
     def _update_table_state(self):
         self._set_widgets_enabled(self.table_option_widgets, self.enable_table_var.get())
-        border = self.entries.get('table_border_size_pt')
-        mode = self.entries.get('table_border_mode')
-        if border is not None and mode is not None:
-            self._set_widgets_enabled([border], self.enable_table_var.get() and mode.get() == '统一边框')
-
-    def _update_signature_state(self):
-        enabled = self.enable_signature_var.get()
-        self._set_widgets_enabled(self.signature_option_widgets, enabled)
-        mode = self.entries.get('signature_before_spacing_mode')
-        self._set_widgets_enabled(self.signature_spacing_widgets,
-                                  enabled and mode is not None and mode.get() == '自定义')
 
     def _config_unit_value(self, widget, default):
         value = widget.get().strip()
@@ -347,10 +313,6 @@ class WordFormatterGUI:
     def _enable_dependent_widgets_for_config_load(self):
         self._set_widgets_enabled(self.attachment_option_widgets, True)
         self._set_widgets_enabled(self.table_option_widgets, True)
-        self._set_widgets_enabled(self.title_after_spacing_widgets, True)
-        self._set_widgets_enabled(self.attachment_after_spacing_widgets, True)
-        self._set_widgets_enabled(self.signature_option_widgets, True)
-        self._set_widgets_enabled(self.signature_spacing_widgets, True)
         english_font_combo = self.entries.get('english_font')
         if english_font_combo:
             english_font_combo.configure(state='normal')
@@ -358,7 +320,7 @@ class WordFormatterGUI:
     def _set_widget_value(self, widget, value, is_size=False):
         previous_state = None
         try:
-            previous_state = str(widget.cget('state'))
+            previous_state = widget.cget('state')
             if previous_state == 'disabled':
                 widget.configure(state=getattr(widget, '_enabled_state', 'normal'))
         except tk.TclError:
@@ -369,8 +331,7 @@ class WordFormatterGUI:
                 display_val = self.font_size_map_rev.get(value, str(value))
                 widget.set(display_val)
             elif isinstance(widget, ttk.Combobox):
-                labels = getattr(widget, '_choice_labels', UNIT_CONFIG_TO_DISPLAY)
-                display_val = labels.get(str(value).strip(), value)
+                display_val = UNIT_CONFIG_TO_DISPLAY.get(str(value).strip(), value)
                 widget.set(display_val)
                 if display_val != self.font_separator:
                     widget._last_valid_value = display_val
@@ -410,140 +371,6 @@ class WordFormatterGUI:
 
     def _show_help_tooltip(self, title, message):
         messagebox.showinfo(title, message, parent=self.master)
-
-    def _load_gui_state(self):
-        state = load_gui_state(self.gui_state_path, self.log_to_debug_window)
-        self._saved_output_dir = state.get('output_dir', '')
-        self.output_dir_var.set(self._saved_output_dir)
-
-    def _remember_output_dir(self, directory=None, show_error=False):
-        value = self.output_dir_var.get() if directory is None else directory
-        try:
-            directory = validate_output_dir(value)
-        except (OSError, ValueError, RuntimeError) as exc:
-            if show_error:
-                messagebox.showwarning('输出目录', str(exc), parent=self.master)
-            return None
-        self.output_dir_var.set(directory)
-        if directory != self._saved_output_dir:
-            try:
-                save_gui_state(self.gui_state_path, directory)
-                self._saved_output_dir = directory
-            except OSError as exc:
-                self.log_to_debug_window(f'保存输出目录记忆失败，本次仍使用所选目录：{exc}')
-        return directory
-
-    def _commit_output_dir(self, event=None):
-        self._remember_output_dir()
-        if getattr(event, 'keysym', None) == 'Return':
-            return 'break'
-
-    def _output_dialog_options(self):
-        try:
-            return {'initialdir': validate_output_dir(self.output_dir_var.get())}
-        except (OSError, ValueError, RuntimeError):
-            return {}
-
-    def _select_output_dir(self):
-        directory = filedialog.askdirectory(
-            title='选择输出文件夹', parent=self.master, mustexist=True,
-            **self._output_dialog_options(),
-        )
-        if directory:
-            return self._remember_output_dir(directory, show_error=True)
-        return None
-
-    def _open_output_dir(self):
-        directory = self._remember_output_dir(show_error=True)
-        if directory is None:
-            return
-
-        def open_directory():
-            try:
-                open_output_directory(directory)
-            except (OSError, ValueError, RuntimeError) as exc:
-                detail = str(exc)
-                self._run_on_main(lambda: messagebox.showerror(
-                    '打开输出目录失败', detail, parent=self.master,
-                ))
-
-        threading.Thread(target=open_directory, daemon=True).start()
-
-    def _create_config_tab(self, title):
-        tab = ttk.Frame(self.config_notebook)
-        self.config_notebook.add(tab, text=title)
-        canvas = tk.Canvas(tab, highlightthickness=0, width=620)
-        scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        content = ttk.Frame(canvas, padding=(6, 4))
-        window = canvas.create_window((0, 0), window=content, anchor='nw')
-        for column in (1, 3):
-            content.columnconfigure(column, weight=1)
-        content.bind('<Configure>', lambda _event: canvas.configure(scrollregion=canvas.bbox('all')))
-        page = {'canvas': canvas, 'content': content, 'window': window}
-        self.config_pages[str(tab)] = page
-        canvas.bind('<Configure>', lambda event: self._fit_config_page(page, event.width))
-        return content
-
-    def _fit_config_page(self, page, width):
-        page['canvas'].itemconfigure(page['window'], width=width)
-        layout = page.get('layout')
-        if not layout:
-            return
-        # Stack the two label/value pairs when desktop fonts or the pane width
-        # would otherwise squeeze the value fields out of view.
-        required = [0, 0, 0, 0]
-        for widget, _row, column, span in layout:
-            if span == 1:
-                required[column] = max(required[column], widget.winfo_reqwidth() + 6)
-        compact = width < sum(required) + 12
-        if compact == page.get('compact'):
-            return
-        page['compact'] = compact
-        for widget, row, column, span in layout:
-            if compact:
-                widget.grid_configure(row=row * 2 + column // 2,
-                                      column=column % 2, columnspan=min(span, 2 - column % 2))
-            else:
-                widget.grid_configure(row=row, column=column, columnspan=span)
-        for column in (1, 3):
-            page['content'].columnconfigure(column, weight=1 if column == 1 or not compact else 0)
-
-    def _on_config_tab_changed(self, _event=None):
-        page = self.config_pages.get(self.config_notebook.select())
-        self._active_config_canvas = page['canvas'] if page else None
-
-    def _on_config_mousewheel(self, event):
-        self._on_config_tab_changed()
-        canvas = self._active_config_canvas
-        widget = event.widget
-        try:
-            if canvas is None or widget.winfo_class() in ('TCombobox', 'Text', 'Listbox', 'Scrollbar', 'TScrollbar'):
-                return
-            while widget is not None and widget != canvas:
-                widget = getattr(widget, 'master', None)
-            if widget != canvas:
-                return
-            bounds = canvas.bbox('all')
-            if not bounds or bounds[3] <= canvas.winfo_height():
-                return
-            number = getattr(event, 'num', None)
-            delta = getattr(event, 'delta', 0)
-            if number == 4:
-                steps = -3
-            elif number == 5:
-                steps = 3
-            elif delta:
-                steps = -int(delta) if sys.platform == 'darwin' else -int(delta / 120)
-                steps = steps or (-1 if delta > 0 else 1)
-            else:
-                return
-            canvas.yview_scroll(steps, 'units')
-            return 'break'
-        except (tk.TclError, AttributeError):
-            return
         
     def _create_help_label(self, parent, text, row, col):
         help_label = ttk.Label(parent, text="(?)", foreground="blue", cursor="hand2")
@@ -558,21 +385,16 @@ class WordFormatterGUI:
 
         left_frame = ttk.Frame(main_pane, padding=5, width=420)
         main_pane.add(left_frame, weight=2)
-        left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(0, weight=3, minsize=160)
-        left_frame.rowconfigure(4, weight=2, minsize=80)
 
         notebook = ttk.Notebook(left_frame)
-        notebook.grid(row=0, column=0, sticky='nsew')
+        notebook.pack(fill=tk.BOTH, expand=True)
         self.notebook = notebook
 
         file_tab = ttk.Frame(notebook)
         notebook.add(file_tab, text=' 文件批量处理 ')
-        file_tab.columnconfigure(0, weight=1)
-        file_tab.rowconfigure(0, weight=1)
         
         list_frame = ttk.LabelFrame(file_tab, text="待处理文件列表（可拖拽文件或文件夹）")
-        list_frame.grid(row=0, column=0, sticky='nsew', pady=5)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         v_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
         h_scrollbar = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL)
@@ -603,7 +425,7 @@ class WordFormatterGUI:
         self.placeholder_label = ttk.Label(self.file_listbox, text=placeholder_text, foreground="grey")
         
         file_button_frame = ttk.Frame(file_tab)
-        file_button_frame.grid(row=1, column=0, sticky='ew', pady=5)
+        file_button_frame.pack(fill=tk.X, pady=5)
         ttk.Button(file_button_frame, text="添加文件", command=self.add_files).grid(row=0, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(file_button_frame, text="添加文件夹", command=self.add_folder).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
         ttk.Button(file_button_frame, text="移除文件", command=self.remove_files).grid(row=1, column=0, sticky='ew', padx=2, pady=2)
@@ -621,18 +443,8 @@ class WordFormatterGUI:
         style = ttk.Style()
         style.configure('Success.TButton', font=('Helvetica', 10, 'bold'), foreground='green')
 
-        output_frame = ttk.LabelFrame(left_frame, text='输出文件夹')
-        output_frame.grid(row=1, column=0, sticky='ew', pady=(5, 0))
-        output_frame.columnconfigure(0, weight=1)
-        self.output_dir_entry = ttk.Entry(output_frame, textvariable=self.output_dir_var)
-        self.output_dir_entry.grid(row=0, column=0, sticky=tk.EW, padx=3, pady=4)
-        self.output_dir_entry.bind('<Return>', self._commit_output_dir)
-        self.output_dir_entry.bind('<FocusOut>', self._commit_output_dir)
-        ttk.Button(output_frame, text='选择', width=5, command=self._select_output_dir).grid(row=0, column=1, padx=(0, 3), pady=4)
-        ttk.Button(output_frame, text='打开', width=5, command=self._open_output_dir).grid(row=0, column=2, padx=(0, 3), pady=4)
-
         left_action_frame = ttk.Frame(left_frame)
-        left_action_frame.grid(row=2, column=0, sticky='ew', pady=(5, 0))
+        left_action_frame.pack(fill=tk.X, pady=(5, 0))
         self.start_btn = ttk.Button(
             left_action_frame,
             text="开始排版",
@@ -642,7 +454,7 @@ class WordFormatterGUI:
         self.start_btn.pack(fill=tk.X, ipady=8)
 
         progress_frame = ttk.Frame(left_frame)
-        progress_frame.grid(row=3, column=0, sticky='ew', pady=(5, 0))
+        progress_frame.pack(fill=tk.X, pady=(5, 0))
         self.progressbar = ttk.Progressbar(
             progress_frame,
             mode='determinate',
@@ -653,23 +465,58 @@ class WordFormatterGUI:
         ttk.Label(progress_frame, textvariable=self.progress_text_var, foreground="grey").pack(anchor=tk.W)
 
         log_frame = ttk.LabelFrame(left_frame, text="调试日志")
-        log_frame.grid(row=4, column=0, sticky='nsew', pady=(5, 0))
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         self.debug_text = scrolledtext.ScrolledText(log_frame, height=10, state='disabled', wrap=tk.WORD)
         self.debug_text.pack(fill=tk.BOTH, expand=True)
 
         right_frame = ttk.Frame(main_pane, padding=4, width=660)
         main_pane.add(right_frame, weight=4)
 
-        right_frame.rowconfigure(0, weight=1)
-        right_frame.columnconfigure(0, weight=1)
-        self.config_notebook = ttk.Notebook(right_frame)
-        self.config_notebook.grid(row=0, column=0, sticky='nsew')
-        basic_frame = self._create_config_tab('页面与正文')
-        heading_frame = self._create_config_tab('标题与附件')
-        tables_frame = self._create_config_tab('表格与图表')
-        self.config_notebook.bind('<<NotebookTabChanged>>', self._on_config_tab_changed)
-        for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
-            right_frame.bind_all(sequence, self._on_config_mousewheel, add='+')
+        config_area = ttk.Frame(right_frame)
+        config_canvas = tk.Canvas(config_area, highlightthickness=0, width=620)
+        config_scrollbar = ttk.Scrollbar(config_area, orient=tk.VERTICAL, command=config_canvas.yview)
+        config_canvas.configure(yscrollcommand=config_scrollbar.set)
+        config_frame = ttk.Frame(config_canvas, padding=(6, 4))
+        config_window = config_canvas.create_window((0, 0), window=config_frame, anchor='nw')
+        for column in (1, 3):
+            config_frame.columnconfigure(column, weight=1)
+
+        def refresh_config_scrollregion(_event=None):
+            config_canvas.configure(scrollregion=config_canvas.bbox("all"))
+
+        def fit_config_width(event):
+            config_canvas.itemconfig(config_window, width=event.width)
+
+        config_frame.bind('<Configure>', refresh_config_scrollregion)
+        config_canvas.bind('<Configure>', fit_config_width)
+        config_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        config_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def event_from_right_config(widget):
+            while widget is not None:
+                if widget == right_frame:
+                    return True
+                widget = getattr(widget, 'master', None)
+            return False
+
+        def on_config_mousewheel(event):
+            if not event_from_right_config(event.widget):
+                return
+            try:
+                if not config_canvas.winfo_exists():
+                    return
+                if getattr(event, 'num', None) == 4:
+                    config_canvas.yview_scroll(-3, "units")
+                elif getattr(event, 'num', None) == 5:
+                    config_canvas.yview_scroll(3, "units")
+                else:
+                    config_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except tk.TclError:
+                pass
+
+        right_frame.bind_all("<MouseWheel>", on_config_mousewheel, add="+")
+        right_frame.bind_all("<Button-4>", on_config_mousewheel, add="+")
+        right_frame.bind_all("<Button-5>", on_config_mousewheel, add="+")
 
         def create_entry(parent, label, var_name, r, c, width=8):
             ttk.Label(parent, text=label).grid(row=r, column=c, sticky=tk.W, padx=3, pady=1)
@@ -707,11 +554,6 @@ class WordFormatterGUI:
             combo = ttk.Combobox(parent, values=list(self.font_size_map.keys()), width=12)
             combo.grid(row=r, column=c+1, sticky=tk.EW, padx=3, pady=1)
             self.entries[var_name] = combo
-            return combo
-
-        def create_choice(parent, label, key, labels, r, c):
-            combo = create_combo(parent, label, key, list(labels.values()), r, c)
-            combo._choice_labels = labels
             return combo
 
         def create_unit_combo(parent, var_name, values, r, c):
@@ -805,11 +647,11 @@ class WordFormatterGUI:
             })
             return r + 1
 
-        page_frame = basic_frame
-        title_frame = heading_frame
-        body_frame = basic_frame
-        table_frame = tables_frame
-        advanced_frame = heading_frame
+        page_frame = config_frame
+        title_frame = config_frame
+        body_frame = config_frame
+        table_frame = config_frame
+        advanced_frame = config_frame
 
         row = create_section_header(page_frame, "页面设置", None, 0)
         create_entry(page_frame, "上边距(cm)", 'margin_top', row, 0)
@@ -826,8 +668,6 @@ class WordFormatterGUI:
         create_combo(page_frame, "页码字体", 'page_number_font', self.font_options['page_number'], row, 0, readonly=False)
         create_font_size_combo(page_frame, "页码字号", 'page_number_size', row, 2)
         row += 1
-        body_row = row
-        row = 0
 
         title_help = "• 主标题: 识别文档开头的连续【居中】且【字体字号相同】的段落。\n• 副标题: 主标题下方，同样【居中】但【字体字号与主标题不同】的段落。\n• TXT文件: 会将首个非层级标题的段落视为题目。"
         row = create_section_header(title_frame, "文章标题", title_help, row)
@@ -841,20 +681,7 @@ class WordFormatterGUI:
         row += 1
         create_spacing_control(title_frame, "副标题行距", 'subtitle_line_spacing', 'subtitle_line_spacing_unit', 'subtitle_line_spacing_multiple', row)
         row += 1
-        create_choice(title_frame, "题目加粗", 'title_bold', BOLD_LABELS, row, 0)
-        create_choice(title_frame, "副标题加粗", 'subtitle_bold', BOLD_LABELS, row, 2)
-        row += 1
-        ttk.Checkbutton(title_frame, text="标题后留白", variable=self.enable_title_after_spacing_var,
-                        command=self._update_title_after_spacing_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
-        title_after_mode = ttk.Combobox(title_frame, textvariable=self.title_after_mode_var,
-                                       values=('空一行', '段落间距'), state='readonly', width=12)
-        title_after_mode.grid(row=row, column=2, columnspan=2, sticky=tk.EW, padx=3, pady=1)
-        title_after_mode.bind('<<ComboboxSelected>>', lambda event: self._update_title_after_spacing_state())
-        self.title_after_mode_widgets = [title_after_mode]
-        row += 1
-        title_after_value = create_entry(title_frame, "段后间距", 'title_after_spacing', row, 0)
-        title_after_unit = create_choice(title_frame, "间距单位", 'title_after_spacing_unit', {'pt': '磅', 'lines': '行'}, row, 2)
-        self.title_after_spacing_widgets = [title_after_value, title_after_unit]
+        ttk.Checkbutton(title_frame, text="题目加粗", variable=self.title_bold_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         headings_help = '• 一级标题: "一、", "二、" ...\n• 二级标题: "（一）", "（二）" ...\n• 三级标题: "1.", "2." ...\n• 四级标题: "(1)", "(2)" ...\n\n注：正文、三级、四级标题共用一套字体字号。'
         row = create_section_header(title_frame, "层级标题", headings_help, row)
@@ -864,11 +691,9 @@ class WordFormatterGUI:
         create_combo(title_frame, "二级标题字体", 'h2_font', self.font_options['h2'], row, 0, readonly=False)
         create_font_size_combo(title_frame, "二级标题字号", 'h2_size', row, 2)
         row += 1
-        create_choice(title_frame, "一级标题加粗", 'h1_bold', BOLD_LABELS, row, 0)
-        create_choice(title_frame, "二级标题加粗", 'h2_bold', BOLD_LABELS, row, 2)
+        ttk.Checkbutton(title_frame, text="一级标题加粗", variable=self.h1_bold_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(title_frame, text="二级标题加粗", variable=self.h2_bold_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
-        attachment_row = row
-        row = body_row
 
         row = create_section_header(body_frame, "正文设置", None, row)
         create_combo(body_frame, "正文/三四级字体", 'body_font', self.font_options['body'], row, 0, readonly=False)
@@ -879,35 +704,27 @@ class WordFormatterGUI:
         row = create_section_header(body_frame, "段落缩进", None, row)
         row = create_indent_controls(body_frame, row)
         row += 1
-        global_row = row
-        row = 0
 
         table_help = (
             "• 默认不启用表格自动调整，启用后才会调整表头/内容字体、字号、行距、行高、列宽和边框。\n"
-            "• 表格位置与单元格文字对齐分别设置；智能对齐时，表头/序号/短文本居中，数字靠右，长文本靠左。\n"
-            "• 可保留原边框或统一边框，底纹始终保留。取消文字环绕后表格按正文顺序排列。\n"
-            "• 浮动表格仍受原定位约束，可同时勾选取消文字环绕以应用整体对齐。"
+            "• 默认保留单元格原始对齐方式；勾选智能对齐后，表头/序号/短文本居中，数字靠右，长文本靠左。"
         )
         row = create_section_header(table_frame, "表格内容", table_help, row)
         ttk.Checkbutton(table_frame, text="启用表格自动调整", variable=self.enable_table_var, command=self._update_table_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
         table_auto_col_width_check = ttk.Checkbutton(table_frame, text="自动调整列宽", variable=self.table_auto_col_width_var)
         table_auto_col_width_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
-        table_border_combo = create_choice(table_frame, "表格边框", 'table_border_mode',
-                                          {'preserve': '保留原边框', 'unified': '统一边框'}, row, 0)
-        table_border_combo.bind('<<ComboboxSelected>>', lambda _event: self._update_table_state(), add='+')
-        table_header_bold_combo = create_choice(table_frame, "表头行加粗", 'table_header_bold', BOLD_LABELS, row, 2)
+        table_unified_borders_check = ttk.Checkbutton(table_frame, text="统一表格边框", variable=self.table_unified_borders_var)
+        table_unified_borders_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        table_header_bold_check = ttk.Checkbutton(table_frame, text="表头行加粗", variable=self.table_header_bold_var)
+        table_header_bold_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         table_header_font_combo = create_combo(table_frame, "表头字体", 'table_header_font', self.font_options['table'], row, 0, readonly=False)
         table_font_combo = create_combo(table_frame, "表格字体", 'table_font', self.font_options['table'], row, 2, readonly=False)
         row += 1
         table_size_combo = create_font_size_combo(table_frame, "表格字号", 'table_size', row, 0)
-        table_alignment_combo = create_choice(table_frame, "表格位置", 'table_alignment', ALIGNMENT_LABELS, row, 2)
-        row += 1
-        table_cell_alignment_combo = create_choice(table_frame, "单元格文字对齐", 'table_cell_alignment',
-                                                  {**ALIGNMENT_LABELS, 'smart': '智能对齐'}, row, 0)
-        table_wrapping_check = ttk.Checkbutton(table_frame, text="取消表格文字环绕", variable=self.table_remove_wrapping_var)
-        table_wrapping_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        table_smart_align_check = ttk.Checkbutton(table_frame, text="智能调整单元格对齐", variable=self.table_smart_align_var)
+        table_smart_align_check.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
         row += 1
         table_spacing_widgets = create_spacing_control(table_frame, "表格行距", 'table_line_spacing', 'table_line_spacing_unit', 'table_line_spacing_multiple', row)
         row += 1
@@ -916,11 +733,10 @@ class WordFormatterGUI:
         row += 1
         table_border_size_entry = create_entry(table_frame, "边框粗细(pt)", 'table_border_size_pt', row, 0)
         self.table_option_widgets = [
-            table_auto_col_width_check, table_border_combo,
+            table_auto_col_width_check, table_unified_borders_check,
             table_header_font_combo, table_font_combo, table_size_combo,
             *table_spacing_widgets, table_row_height_entry, table_width_percent_entry,
-            table_border_size_entry, table_header_bold_combo, table_alignment_combo,
-            table_cell_alignment_combo, table_wrapping_check,
+            table_border_size_entry, table_header_bold_check, table_smart_align_check
         ]
         self._update_table_state()
         row += 1
@@ -933,70 +749,15 @@ class WordFormatterGUI:
         create_font_size_combo(table_frame, "图形标题字号", 'figure_caption_size', row, 2)
         row += 1
 
-        row = attachment_row
-        attachment_help = ('• 支持"附件"、"附件："、"附件1"、"附件一"及标识与名称同段。\n'
-                           '• 先区分清单和正文：清单不强制分页；正文结合分页、独立标题等线索识别，再设置段前分页。\n'
-                           '• 缺少正文线索的同段条目按清单保留并记录提示，正文中的“附件1所列资料”等不作为标识。\n'
-                           '• 标题后留白只作用于标题组末尾：默认关闭，启用时默认空一行；已有空行不重复添加。\n'
-                           '• 也可选择段落间距；空行采用正文行距，不作用于附件清单。')
+        attachment_help = '• 附件标识: 识别"附件1"、"附件："等独立段落。启用后将自动【段前分页】并按主副标题规则识别其自身标题。'
         row = create_section_header(advanced_frame, "附件与增强", attachment_help, row)
         ttk.Checkbutton(advanced_frame, text="启用附件格式化", variable=self.enable_attachment_var, command=self._update_attachment_state).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
         attachment_font_combo = create_combo(advanced_frame, "附件标识字体", 'attachment_font', self.font_options['attachment'], row, 2, readonly=False)
         row += 1
         attachment_size_combo = create_font_size_combo(advanced_frame, "附件标识字号", 'attachment_size', row, 0)
-        attachment_bold_combo = create_choice(advanced_frame, "附件标识加粗", 'attachment_bold', BOLD_LABELS, row, 2)
-        self.attachment_option_widgets = [attachment_font_combo, attachment_size_combo, attachment_bold_combo]
-        row += 1
-        attachment_after_check = ttk.Checkbutton(advanced_frame, text="附件标题后留白",
-                                                variable=self.enable_attachment_title_after_spacing_var,
-                                                command=self._update_title_after_spacing_state)
-        attachment_after_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
-        self.attachment_option_widgets.append(attachment_after_check)
-        attachment_after_mode = ttk.Combobox(advanced_frame, textvariable=self.attachment_after_mode_var,
-                                             values=('空一行', '段落间距'), state='readonly', width=12)
-        attachment_after_mode.grid(row=row, column=2, columnspan=2, sticky=tk.EW, padx=3, pady=1)
-        attachment_after_mode.bind('<<ComboboxSelected>>', lambda event: self._update_title_after_spacing_state())
-        self.attachment_after_mode_widgets = [attachment_after_mode]
-        row += 1
-        attachment_after_value = create_entry(advanced_frame, "段后间距", 'attachment_title_after_spacing', row, 0)
-        attachment_after_unit = create_choice(advanced_frame, "间距单位", 'attachment_title_after_spacing_unit', {'pt': '磅', 'lines': '行'}, row, 2)
-        self.attachment_after_spacing_widgets = [attachment_after_value, attachment_after_unit]
+        self.attachment_option_widgets = [attachment_font_combo, attachment_size_combo]
         self._update_attachment_state()
         row += 1
-        signature_help = ('• 默认关闭；只识别主文末尾的单一机关署名与完整有效日期，附件正文可另行勾选。\n'
-                          '• 盖章布局：日期右空四字，署名以日期为中心；不盖章布局：根据两行长度调整，右侧至少留二字。\n'
-                          '• 不添加、识别或移动印章；联合署名、个人签名、图片、字段及修订等复杂区域不作专项调整。\n'
-                          '• 字体、字号、行距沿用正文，加粗保留。原字体缺失时估算宽度并提示，最终位置请在 Office/WPS 检查。\n'
-                          '• 按模式处理间距：盖章布局保持原间距；不盖章布局无原有空段时设置30磅段前。已有空段时不追加。\n'
-                          '• 自定义“行”是 Word 段落间距单位，与国标一行30磅不同；不插入或删除空段落。\n'
-                          '• 日期规范化默认关闭，开启后仅将确认的静态落款日期转为阿拉伯数字年月日，月日不补零。')
-        row = create_section_header(advanced_frame, "落款", signature_help, row)
-        ttk.Checkbutton(advanced_frame, text="启用落款格式化", variable=self.enable_signature_var,
-                        command=self._update_signature_state).grid(row=row, column=0, columnspan=2,
-                                                                  sticky=tk.W, padx=3, pady=1)
-        signature_layout = create_choice(advanced_frame, "落款排法", 'signature_layout',
-                                         {'sealed': '盖章公文文字布局', 'unsealed': '不盖章布局'}, row, 2)
-        row += 1
-        signature_attachments = ttk.Checkbutton(advanced_frame, text="同时处理附件正文落款",
-                                                variable=self.signature_include_attachments_var)
-        signature_attachments.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
-        signature_dates = ttk.Checkbutton(advanced_frame, text="规范落款日期文字",
-                                          variable=self.signature_normalize_date_var)
-        signature_dates.grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
-        row += 1
-        signature_spacing_mode = create_choice(advanced_frame, "段前间距", 'signature_before_spacing_mode',
-                                               {'auto': '按模式处理', 'preserve': '保持原间距', 'custom': '自定义'}, row, 0)
-        signature_spacing_mode.bind('<<ComboboxSelected>>', lambda _event: self._update_signature_state(), add='+')
-        row += 1
-        signature_spacing_value = create_entry(advanced_frame, "自定义段前", 'signature_before_spacing', row, 0)
-        signature_spacing_unit = create_choice(advanced_frame, "间距单位", 'signature_before_spacing_unit',
-                                               {'pt': '磅', 'lines': '行'}, row, 2)
-        self.signature_option_widgets = [signature_layout, signature_attachments, signature_dates, signature_spacing_mode]
-        self.signature_spacing_widgets = [signature_spacing_value, signature_spacing_unit]
-        self._update_signature_state()
-        row += 1
-        advanced_frame = basic_frame
-        row = global_row
         row = create_section_header(advanced_frame, "全局选项", None, row)
         if not IS_WINDOWS:
             ttk.Checkbutton(
@@ -1006,6 +767,21 @@ class WordFormatterGUI:
             row += 1
         ttk.Checkbutton(advanced_frame, text="自动设置大纲级别", variable=self.set_outline_var).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
         ttk.Checkbutton(advanced_frame, text="启用符号标准化", variable=self.normalize_punctuation_var).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="用标准样式统一同级文字", variable=self.use_builtin_styles_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="识别条标题（第X条）", variable=self.detect_article_title_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="清除未使用的自定义样式", variable=self.clear_unused_styles_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="删除页眉页脚", variable=self.remove_headers_footers_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
         row += 1
         ttk.Checkbutton(
             advanced_frame,
@@ -1018,25 +794,52 @@ class WordFormatterGUI:
         row += 1
         blank_line_combo = create_combo(advanced_frame, "TXT/MD空行处理", 'blank_line_mode', BLANK_LINE_MODE_OPTIONS, row, 0, width=34)
         blank_line_combo.grid_configure(columnspan=3)
+        row += 1
+        enhance_help = (
+            "• 浮动对象转插入式：把浮动排版的图片、嵌入对象和表格改为随文字排布，便于统一排版。\n"
+            "• 图片行改单倍行距：含图片或嵌入对象的段落写为单倍行距，避免固定行距裁切对象（含表格内的图片）。\n"
+            "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。\n"
+            "• 识别章/节层级：把“第X章”识别为 1 级、“第X节”识别为 2 级，“一、/（一）”等编号标题整体顺延。\n"
+            "• 合并等长断行：文档大量在同一位置断行（多为 PDF 粘贴）时，把断行还原为整段。"
+        )
+        row = create_section_header(advanced_frame, "增强选项（实验功能）", enhance_help, row)
+        ttk.Checkbutton(
+            advanced_frame, text="浮动对象转插入式", variable=self.convert_floating_objects_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="图片行改单倍行距", variable=self.media_single_line_spacing_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="标题等级合并与防跳级", variable=self.normalize_heading_levels_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="识别章/节层级", variable=self.detect_chapter_section_var,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        ttk.Checkbutton(
+            advanced_frame, text="合并等长断行", variable=self.merge_broken_lines_var,
+        ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
 
         self._refresh_spacing_controls()
         self._refresh_indent_controls()
 
         config_buttons = ttk.Frame(right_frame)
-        self.config_buttons = config_buttons
-        config_buttons.grid(row=1, column=0, sticky='ew', pady=(4, 0))
+        config_buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         ttk.Button(config_buttons, text="加载配置", command=self.load_config).grid(row=0, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="保存配置", command=self.save_config).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="保存为默认", command=self.save_default_config).grid(row=1, column=0, sticky='ew', padx=2, pady=2)
         ttk.Button(config_buttons, text="恢复内置默认", command=self.load_defaults).grid(row=1, column=1, sticky='ew', padx=2, pady=2)
+        ttk.Button(
+            config_buttons, text="公文格式排版", command=lambda: self.apply_preset('format'),
+        ).grid(row=2, column=0, sticky='ew', padx=2, pady=2)
+        ttk.Button(
+            config_buttons, text="排版清洗", command=lambda: self.apply_preset('clean'),
+        ).grid(row=2, column=1, sticky='ew', padx=2, pady=2)
         config_buttons.columnconfigure(0, weight=1)
         config_buttons.columnconfigure(1, weight=1)
-        for page in self.config_pages.values():
-            page['layout'] = [(widget, int(info['row']), int(info['column']), int(info['columnspan']))
-                              for widget in page['content'].winfo_children()
-                              for info in [widget.grid_info()] if info]
-            self._fit_config_page(page, page['canvas'].winfo_width())
-        self._on_config_tab_changed()
+        config_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self._update_listbox_placeholder()
 
@@ -1113,7 +916,7 @@ class WordFormatterGUI:
         return BLANK_LINE_MODE_DELETE_SINGLE if remove_blank_lines else BLANK_LINE_MODE_KEEP_SINGLE
 
     def _apply_config(self, loaded_config):
-        loaded_config = normalize_format_options(loaded_config)
+        loaded_config = dict(loaded_config)
         if 'use_custom_english_font' not in loaded_config and loaded_config.get('use_times_new_roman'):
             loaded_config['use_custom_english_font'] = True
             loaded_config.setdefault('english_font', 'Times New Roman')
@@ -1136,28 +939,34 @@ class WordFormatterGUI:
         self.force_a4_var.set(loaded_config.get('force_a4', False))
         self.use_custom_english_font_var.set(loaded_config.get('use_custom_english_font', False))
         self.normalize_punctuation_var.set(loaded_config.get('normalize_punctuation', False))
+        self.convert_floating_objects_var.set(loaded_config.get('convert_floating_objects', False))
+        self.media_single_line_spacing_var.set(loaded_config.get('media_single_line_spacing', False))
+        self.normalize_heading_levels_var.set(loaded_config.get('normalize_heading_levels', False))
+        self.detect_chapter_section_var.set(loaded_config.get('detect_chapter_section', False))
+        self.use_builtin_styles_var.set(loaded_config.get('use_builtin_styles', True))
+        self.detect_article_title_var.set(loaded_config.get('detect_article_title', True))
+        self.merge_broken_lines_var.set(loaded_config.get('merge_broken_lines', False))
+        self.clear_unused_styles_var.set(loaded_config.get('clear_unused_styles', True))
+        self.remove_headers_footers_var.set(loaded_config.get('remove_headers_footers', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
         self.enable_table_var.set(loaded_config.get('enable_table_formatting', False))
         self.table_auto_col_width_var.set(loaded_config.get('table_auto_col_width', True))
-        self.table_remove_wrapping_var.set(loaded_config.get('table_remove_text_wrapping', False))
-        self.enable_title_after_spacing_var.set(bool(loaded_config.get('enable_title_after_spacing', False)
-                                                     or loaded_config.get('enable_title_after_blank_line', False)))
-        self.enable_attachment_title_after_spacing_var.set(bool(loaded_config.get('enable_attachment_title_after_spacing', False)
-                                                                or loaded_config.get('enable_attachment_title_after_blank_line', False)))
-        self.title_after_mode_var.set('段落间距' if loaded_config.get('enable_title_after_spacing', False) else '空一行')
-        self.attachment_after_mode_var.set('段落间距' if loaded_config.get('enable_attachment_title_after_spacing', False) else '空一行')
-        self.enable_signature_var.set(loaded_config.get('enable_signature_formatting', False))
-        self.signature_include_attachments_var.set(loaded_config.get('signature_include_attachments', False))
-        self.signature_normalize_date_var.set(loaded_config.get('signature_normalize_date', False))
+        self.table_header_bold_var.set(loaded_config.get('table_header_bold', True))
+        self.table_smart_align_var.set(loaded_config.get('table_smart_align', False))
+        self.table_unified_borders_var.set(loaded_config.get('table_unified_borders', True))
+        self.title_bold_var.set(loaded_config.get('title_bold', False))
+        self.h1_bold_var.set(loaded_config.get('h1_bold', False))
+        self.h2_bold_var.set(loaded_config.get('h2_bold', False))
         boolean_keys = [
             'convert_auto_numbering',
             'set_outline', 'enable_attachment_formatting', 'force_a4',
             'use_custom_english_font', 'use_times_new_roman',
             'remove_blank_lines', 'normalize_punctuation',
-            'enable_table_formatting', 'table_auto_col_width', 'table_remove_text_wrapping',
-            'enable_title_after_spacing', 'enable_attachment_title_after_spacing',
-            'enable_title_after_blank_line', 'enable_attachment_title_after_blank_line',
-            'enable_signature_formatting', 'signature_include_attachments', 'signature_normalize_date',
+            'enable_table_formatting', 'table_auto_col_width', 'table_header_bold',
+            'table_smart_align', 'table_unified_borders',
+            'title_bold', 'h1_bold', 'h2_bold',
+            'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels',
+            'detect_chapter_section', 'merge_broken_lines'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -1168,12 +977,21 @@ class WordFormatterGUI:
         self._update_english_font_state()
         self._update_attachment_state()
         self._update_table_state()
-        self._update_signature_state()
         self._refresh_spacing_controls()
         self._refresh_indent_controls()
 
     def load_defaults(self):
         self._apply_config(self.default_params)
+
+    def apply_preset(self, name):
+        """套用「公文格式排版 / 排版清洗」快捷配置。"""
+        preset = PRESET_GROUPS.get(name)
+        if not preset:
+            return
+        config = self.collect_config()
+        config.update(preset['values'])
+        self._apply_config(config)
+        messagebox.showinfo("快捷配置", f"已套用「{preset['label']}」推荐配置：\n{preset['description']}")
     
     def collect_config(self):
         config = {}
@@ -1183,8 +1001,6 @@ class WordFormatterGUI:
                 value = getattr(widget, '_last_valid_value', '').strip()
             if isinstance(widget, ttk.Combobox) and getattr(widget, '_is_unit_combo', False):
                 value = UNIT_DISPLAY_TO_CONFIG.get(value, value)
-            if getattr(widget, '_choice_labels', None):
-                value = {label: mode for mode, label in widget._choice_labels.items()}.get(value, value)
             if value == '' and key in self.default_params:
                 config[key] = self.default_params[key]
                 continue
@@ -1204,43 +1020,36 @@ class WordFormatterGUI:
         config['force_a4'] = self.force_a4_var.get()
         config['use_custom_english_font'] = self.use_custom_english_font_var.get()
         config['normalize_punctuation'] = self.normalize_punctuation_var.get()
+        config['convert_floating_objects'] = self.convert_floating_objects_var.get()
+        config['media_single_line_spacing'] = self.media_single_line_spacing_var.get()
+        config['normalize_heading_levels'] = self.normalize_heading_levels_var.get()
+        config['detect_chapter_section'] = self.detect_chapter_section_var.get()
+        config['use_builtin_styles'] = self.use_builtin_styles_var.get()
+        config['detect_article_title'] = self.detect_article_title_var.get()
+        config['merge_broken_lines'] = self.merge_broken_lines_var.get()
+        config['clear_unused_styles'] = self.clear_unused_styles_var.get()
+        config['remove_headers_footers'] = self.remove_headers_footers_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
         config['enable_table_formatting'] = self.enable_table_var.get()
         config['table_auto_col_width'] = self.table_auto_col_width_var.get()
-        config['table_remove_text_wrapping'] = self.table_remove_wrapping_var.get()
-        for scope, enabled, mode in (
-                ('title', self.enable_title_after_spacing_var.get(), self.title_after_mode_var.get()),
-                ('attachment_title', self.enable_attachment_title_after_spacing_var.get(), self.attachment_after_mode_var.get())):
-            config['enable_' + scope + '_after_blank_line'] = enabled and mode == '空一行'
-            config['enable_' + scope + '_after_spacing'] = enabled and mode == '段落间距'
-        config['enable_signature_formatting'] = self.enable_signature_var.get()
-        config['signature_include_attachments'] = self.signature_include_attachments_var.get()
-        config['signature_normalize_date'] = self.signature_normalize_date_var.get()
-        return normalize_format_options(config)
-
-    def _collect_valid_config(self):
-        try:
-            return self.collect_config()
-        except (ValueError, TypeError) as exc:
-            messagebox.showerror('配置错误', str(exc), parent=self.master)
-            return None
+        config['table_header_bold'] = self.table_header_bold_var.get()
+        config['table_smart_align'] = self.table_smart_align_var.get()
+        config['table_unified_borders'] = self.table_unified_borders_var.get()
+        config['title_bold'] = self.title_bold_var.get()
+        config['h1_bold'] = self.h1_bold_var.get()
+        config['h2_bold'] = self.h2_bold_var.get()
+        return config
 
     def save_config(self):
-        config = self._collect_valid_config()
-        if config is None:
-            return
         file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
         if file_path:
-            with open(file_path, 'w', encoding='utf-8') as f: json.dump(config, f, ensure_ascii=False, indent=4)
+            with open(file_path, 'w', encoding='utf-8') as f: json.dump(self.collect_config(), f, ensure_ascii=False, indent=4)
             messagebox.showinfo("成功", f"配置已保存至 {file_path}")
     
     def save_default_config(self):
         try:
-            config = self._collect_valid_config()
-            if config is None:
-                return
             with open(self.default_config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
+                json.dump(self.collect_config(), f, ensure_ascii=False, indent=4)
             messagebox.showinfo("成功", f"当前配置已保存为默认配置。\n下次启动软件时将自动加载。")
         except Exception as e:
             messagebox.showerror("错误", f"保存默认配置失败: {e}")
@@ -1314,7 +1123,14 @@ class WordFormatterGUI:
         self._update_listbox_placeholder()
 
     def add_files(self):
-        files = filedialog.askopenfilenames(filetypes=[("所有支持的文件", "*.docx;*.doc;*.wps;*.txt;*.md"), ("Word 文档", "*.docx;*.doc"), ("WPS 文档", "*.wps"), ("纯文本", "*.txt"), ("Markdown", "*.md")])
+        # pattern 列表用元组/空格分隔，分号分隔在非 Windows 平台会被当成单个 pattern
+        files = filedialog.askopenfilenames(filetypes=[
+            ("所有支持的文件", ("*.docx", "*.doc", "*.wps", "*.txt", "*.md")),
+            ("Word 文档", ("*.docx", "*.doc")),
+            ("WPS 文档", "*.wps"),
+            ("纯文本", "*.txt"),
+            ("Markdown", "*.md"),
+        ])
         if files:
             self._add_paths_to_listbox(files)
         
@@ -1365,23 +1181,22 @@ class WordFormatterGUI:
   • 二级标题: “（一）”, “（二）” ...
   • 三级标题: “1.”, “2.” ...
   • 四级标题: “(1)”, “(2)” ...
+  • 条标题: “第X条”“第XX条”“第XXX条”（默认开启）。级别跟随章/节顺延：有章时 2 级、章+节时 3 级、无章无节时 1 级；条后空格会被清除，条后紧跟的正文自动另起一段按正文排版。
   • 注：正文、三级、四级标题默认共用一套字体字号。
 
 - 其他元素:
   • 图/表标题: 自动查找图片或表格【上方或下方】最近的、居中的、以“图”或“表”开头的段落。
-  • 附件: 支持“附件”、“附件1”、“附件一”、“附件：”及标识名称同段。先区分清单和正文，清单不强制分页；正文结合分页、独立标题等线索识别。缺少线索的同段条目按清单保留并提示。“附件1所列资料”等正文引用不作为标识。
-  • 表格内容: 默认不启用表格自动调整。启用后可分别设置表格位置、单元格对齐、表头加粗、字体、字号、行距、行高、列宽和边框，底纹保持原样；可选择取消文字环绕。
+  • 附件标识: 识别“附件1”、“附件：”等独立段落。启用附件格式化后，将自动【段前分页】并按主副标题规则识别其自身标题。
+  • 表格内容: 默认不启用表格自动调整。启用后可分别设置表头/内容字体，并统一字号、行距、行高、列宽、边框，可选智能对齐。
 
 【其他特性】
 - 纸张设置：直接输入文本默认使用A4纸。文件处理默认保持原样，可勾选“强制设置为A4纸张”进行修改。
-- 加粗控制：题目、副标题、一二级标题、附件标识及表头均可选择【保留原样、加粗、不加粗】。旧配置中的加粗 true/false 分别对应【加粗、保留原样】。
-- 标题后留白：主文与附件分别设置，默认关闭；启用时默认空一行，已有空行不重复添加，空行采用正文行距。也可选择段落间距（磅或行），两种方式不叠加，均只作用于标题及副标题组的末尾。旧配置中的段落间距保持原设置。
-- 落款格式化：默认关闭。仅确认末尾单一机关署名与有效日期，支持盖章公文文字布局和不盖章布局；附件落款、日期文字规范化分别设置，均默认关闭。字体、字号、行距沿用正文；图片、字段、修订和联合署名等复杂区域跳过专项调整。段前间距可按模式处理、保留或自定义，不增删空段；Word的“行”间距单位与国标一行30磅不同。字体缺失时估算宽度并提示，最终位置请在 Office/WPS 检查。
-- 二级标题智能拆分：若二级标题后紧跟正文（如"（一）标题。正文..."），会在同段内为标题和正文应用不同格式，并保留超链接、图片、域及书签等对象。
+- 保留原文格式：统一格式时，会保留【加粗、斜体、下划线、字体颜色】等。
+- 标准样式统一（默认开启，可在全局选项关闭）：段落等级确定后，各级字体字号加粗行距会写进 Word「标准样式」组的【正文 / 标题 1~4】，并把同级段落套上对应样式，同级文字共用一套样式，后续改样式即可整体同步。未排版的内容（表格、页眉页脚、空行）保持原有字体字号。
+- 输出文件名：与源文件同名（不再追加 _formatted 后缀）；与源文件冲突时自动追加序号，绝不覆盖原件。
+- 二级标题智能拆分：若二级标题后紧跟正文（如"（一）标题。正文..."），会自动在【同一个段落内】为标题和正文应用不同格式。
 - 豁免内容：图片、嵌入对象等内容会自动跳过格式化；表格仅在勾选“启用表格自动调整”后处理。
 - 参数自定义：所有核心参数均可在界面调整。配置方案可【保存】和【加载】。
-- 配置界面：右侧分为“页面与正文”“标题与附件”“表格与图表”，底部按钮保存和加载全部标签页的配置。
-- 输出目录：左侧可选择、输入和打开输出文件夹，自动独立记忆；直接输入文本另存为时也使用该目录。目录记忆不随排版配置的加载或恢复而改变。
 - Markdown 支持：.md 文件会自动清理 Markdown 标记（标题#、粗体**、链接[]()、图片![]()等）后转为纯文本进行排版。
 - 空行处理：TXT/MD 支持三种模式：不改动任何空行；删除单个空行且多个空行保留至1个空行；保留单个空行且多个空行保留至1个空行。默认使用“删除单个空行，多个空行保留至1个空行”。
 - 跨平台说明：Windows 优先使用 WPS/Word 自动编号预处理，不可用或失败时回退到 Python 转换；macOS/Kylin/UOS/Linux 默认识别自动编号并转为文字（包含表格），可在全局选项关闭。Python 转换对不支持的编号保留并记录警告，不自动接受修订，也不新增编号后空白；随后按当前配置排版。非 Windows 或 Windows COM 不可用时，.doc/.wps 仍需 LibreOffice 转为 DOCX；未安装时跳过旧格式文件，.docx/.txt/.md 仍可处理。
@@ -1418,9 +1233,7 @@ class WordFormatterGUI:
             return
 
         active_tab_index = self.notebook.index(self.notebook.select())
-        collected_config = self._collect_valid_config()
-        if collected_config is None:
-            return
+        collected_config = self.collect_config()
         file_list = []
         text_content = ""
         output_dir = None
@@ -1431,10 +1244,7 @@ class WordFormatterGUI:
             if not file_list:
                 messagebox.showwarning("警告", "文件列表为空，请先添加文件！", parent=self.master)
                 return
-            if not self.output_dir_var.get().strip():
-                output_dir = self._select_output_dir()
-            else:
-                output_dir = self._remember_output_dir(show_error=True)
+            output_dir = filedialog.askdirectory(title="请选择一个文件夹用于存放处理后的文件")
             if not output_dir:
                 return
         elif active_tab_index == 1:
@@ -1445,13 +1255,9 @@ class WordFormatterGUI:
             output_path = filedialog.asksaveasfilename(
                 defaultextension=".docx",
                 filetypes=[("Word Document", "*.docx")],
-                initialfile="formatted_document.docx",
-                parent=self.master,
-                **self._output_dialog_options(),
+                initialfile="formatted_document.docx"
             )
             if not output_path:
-                return
-            if not self._remember_output_dir(os.path.dirname(os.path.abspath(output_path)), show_error=True):
                 return
 
         self._clear_debug_log()
@@ -1490,16 +1296,31 @@ class WordFormatterGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @staticmethod
+    def _unique_output_path(output_dir, stem, input_path, used_paths):
+        """输出沿用原文件名；与源文件同名或本次已有同名输出时追加序号，避免覆盖。"""
+        candidate = os.path.join(output_dir, f"{stem}.docx")
+        counter = 2
+        while True:
+            key = os.path.normcase(os.path.abspath(candidate))
+            if key != os.path.normcase(os.path.abspath(input_path)) and key not in used_paths:
+                break
+            candidate = os.path.join(output_dir, f"{stem}_{counter}.docx")
+            counter += 1
+        used_paths.add(key)
+        return candidate
+
     def _process_files(self, processor, file_list, output_dir):
         success_count, fail_count, skipped_count = 0, 0, 0
         total = len(file_list)
+        used_outputs = set()
         for i, input_path in enumerate(file_list, start=1):
             base_name = os.path.basename(input_path)
             self._set_progress((i - 1) / total * 100, f"处理中 {i}/{total}: {base_name}")
             try:
                 self.log_to_debug_window(f"\n--- 开始处理文件 {i}/{total}: {base_name} ---")
                 output_name = os.path.splitext(base_name)[0]
-                output_path = os.path.join(output_dir, f"{output_name}_formatted.docx")
+                output_path = self._unique_output_path(output_dir, output_name, input_path, used_outputs)
                 processor.format_document(input_path, output_path)
                 self.log_to_debug_window(f"✅ 文件处理成功，已保存至: {output_path}")
                 success_count += 1
@@ -1567,7 +1388,6 @@ class WordFormatterGUI:
         if self.is_processing:
             if not messagebox.askyesno("确认", "任务仍在进行中，确定要退出吗？", parent=self.master):
                 return
-        self._remember_output_dir()
         self._drain_log_queue()
         self.master.destroy()
 
