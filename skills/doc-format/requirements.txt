@@ -1,5 +1,5 @@
-python-docx>=1.1.0
-lxml>=5.2
-fonttools>=4.53,<5
-tkinterdnd2
-pywin32; platform_system == "Windows"
+python-docx>=1.2.0
+lxml>=6.1.1
+fonttools>=4.68.0,<5
+tkinterdnd2>=0.7.0
+pywin32>=306; platform_system == "Windows"
