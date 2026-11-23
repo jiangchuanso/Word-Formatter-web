@@ -33,7 +33,7 @@ if errorlevel 1 (
 echo [3/4] ¼ì²éÒÀÀµ...
 set "NEED_INSTALL=0"
 if not "%WFP_SKIP_DEPS%"=="1" (
-    python -c "import fastapi, uvicorn, multipart, docx, lxml" >nul 2>&1
+    python -c "import fastapi, uvicorn, multipart, filetype, docx, lxml" >nul 2>&1
     if errorlevel 1 set "NEED_INSTALL=1"
 )
 if "!NEED_INSTALL!"=="1" (

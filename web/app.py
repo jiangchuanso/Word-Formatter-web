@@ -34,6 +34,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    import filetype  # noqa: E402
+except ImportError:  # 老环境未装时降级为「仅后缀校验」，不阻断服务启动
+    filetype = None
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
@@ -496,6 +500,85 @@ async def index():
 
 
 # --------------------------------------------------------------------------- #
+# 文件内容嗅探：filetype 基于文件头识别真实类型，防止「改后缀」伪装上传。
+# 策略：
+#   .docx        必须识别为 docx（识别不出/识别成 zip、pdf 等一律拦截）
+#   .doc / .wps  识别为 doc 放行；识别不出但头部是 OLE2 复合文档则放行
+#                （合法老版 Word/WPS；filetype 的 Doc matcher 签名苛刻，认不出属正常）
+#   .txt / .md   必须「识别不出 + 内容确实像纯文本」才放行，否则拦截
+# filetype 认不出且无结构兜底的非纯文本一律不放行。
+# --------------------------------------------------------------------------- #
+_OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "gb18030")  # 与 wfp_core._read_text_file 一致
+_HEADER_BYTES = 8192
+
+
+def _read_header(path: Path, size: int = _HEADER_BYTES) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(size)
+    except OSError:
+        return b""
+
+
+def _is_ole2(header: bytes) -> bool:
+    return header.startswith(_OLE2_SIGNATURE)
+
+
+def _is_probably_text(header: bytes) -> bool:
+    """按项目支持的编码试解码；含 NUL 或全编码失败视为二进制。"""
+    if not header or b"\x00" in header:
+        return False
+    for enc in _TEXT_ENCODINGS:
+        try:
+            header.decode(enc)
+            return True
+        except UnicodeDecodeError:
+            continue
+    return False
+
+
+def _detect_file_type(path: Path):
+    """返回 filetype 识别出的扩展名（如 'docx'/'pdf'），无法识别返回 None。"""
+    if filetype is None:
+        return None
+    try:
+        kind = filetype.guess(str(path))
+    except (OSError, ValueError, TypeError):
+        return None
+    return kind.extension.lower() if kind and kind.extension else None
+
+
+def _content_mismatch_reason(ext: str, detected, header: bytes) -> str | None:
+    """后缀与内容冲突时返回中文原因；通过校验返回 None。"""
+    if ext == ".docx":
+        # 真 docx 必须被识别为 docx；None/zip/pdf/exe 等一律拒绝
+        if detected == "docx":
+            return None
+        if detected is None:
+            return "无法识别为有效的 Word 文档（.docx）"
+        return f"文件内容实际为 {detected} 格式，与后缀 .docx 不符"
+
+    if ext in (".doc", ".wps"):
+        if detected == "doc":
+            return None
+        if detected is None and _is_ole2(header):
+            return None  # 老版 Word/WPS 合法 OLE2，filetype 签名苛刻认不出
+        if detected is None:
+            return f"无法识别为有效的 {ext} 文档"
+        return f"文件内容实际为 {detected} 格式，与后缀 {ext} 不符"
+
+    if ext in (".txt", ".md"):
+        if detected is not None:
+            return f"文件内容实际为 {detected} 二进制格式，与后缀 {ext} 不符"
+        if not _is_probably_text(header):
+            return f"文件内容不是有效的纯文本，与后缀 {ext} 不符"
+        return None
+
+    return None  # 白名单外的后缀已在前面拦截
+
+
+# --------------------------------------------------------------------------- #
 # 上传保存：分块写盘，避免大文件整体驻留内存
 # --------------------------------------------------------------------------- #
 async def _write_upload(uf: UploadFile, dest: Path) -> int:
@@ -535,7 +618,14 @@ async def _save_uploads(files: list[UploadFile], upload_dir: Path):
                 dest.unlink(missing_ok=True)
                 skipped.append(f"{original_name}（空文件）")
             else:
-                saved.append((original_name, str(dest)))
+                detected = _detect_file_type(dest)
+                reason = _content_mismatch_reason(ext, detected, _read_header(dest))
+                if reason:
+                    dest.unlink(missing_ok=True)
+                    skipped.append(f"{original_name}（{reason}）")
+                    logger.warning("拦截伪装上传：%s", skipped[-1])
+                else:
+                    saved.append((original_name, str(dest)))
         finally:
             await uf.close()
     return saved, skipped

@@ -745,21 +745,63 @@ $('#resetBtn').addEventListener('click', () => {
 });
 
 // ---------- 文件输入 ----------
-function addFiles(fileList) {
+// 轻量魔数预检：拦截已知二进制特征伪装；无特征（如纯文本、filetype 认不出的老文档）
+// 交给后端 filetype 嗅探兜底即时判断。后端为最终准绳。
+const MAGIC_SIGNATURES = [
+  { key: 'exe', test: b => b.length >= 2 && b[0] === 0x4d && b[1] === 0x5a },       // MZ
+  { key: 'pdf', test: b => asciiAt(b, 0, 5) === '%PDF-' },
+  { key: 'png', test: b => b.length >= 4 && b[0] === 0x89 && asciiAt(b, 1) === 'PNG' },
+  { key: 'jpg', test: b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { key: 'gif', test: b => asciiAt(b, 0, 4) === 'GIF8' },
+  { key: 'doc', test: b => b.length >= 4 && b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0 }, // OLE2
+  { key: 'zip', test: b => asciiAt(b, 0, 4) === 'PK\u0003\u0004' },
+];
+function asciiAt(bytes, offset, len) {
+  len = len || (bytes.length - offset);
+  let s = '';
+  for (let i = offset; i < offset + len && i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+}
+function detectMagic(bytes) {
+  for (const sig of MAGIC_SIGNATURES) if (sig.test(bytes)) return sig.key;
+  return null;
+}
+// 返回伪装原因；null 表示放行（无已知特征时交给后端 filetype 判定）
+function magicMismatch(ext, magic) {
+  if (!magic) return null;
+  // 真 docx 是 zip；doc(OLE2) 魔数说明是老格式改后缀，同样拒绝
+  if (ext === '.docx') return magic === 'zip' ? null : `${magic} 内容伪装成 .docx`;
+  // 老版 Word/WPS 是 OLE2；zip/pdf/exe 等均为伪装
+  if (ext === '.doc' || ext === '.wps') return magic === 'doc' ? null : `${magic} 内容伪装成 ${ext}`;
+  // 纯文本不应携带任何二进制特征
+  if (ext === '.txt' || ext === '.md') return `${magic} 二进制内容伪装成 ${ext}`;
+  return null;
+}
+async function addFiles(fileList) {
   if (!SCHEMA) { toast('参数尚未加载完成，请稍候'); return; }
   const maxBytes = SCHEMA.limits.max_upload_bytes;
-  let skipped = 0, duplicated = 0;
+  let skipped = 0, duplicated = 0, disguised = 0;
+  const candidates = [];
   for (const f of Array.from(fileList || [])) {
     const ext = '.' + (f.name.split('.').pop() || '').toLowerCase();
     if (!SCHEMA.supported_extensions.includes(ext)) { skipped++; continue; }
     if (f.size > maxBytes) { skipped++; continue; }
-    const dup = filesData.some(x => x.name === f.name && x.size === f.size && x.file.lastModified === f.lastModified);
-    if (dup) { duplicated++; continue; }
-    filesData.push({ name: f.name, file: f, size: f.size });
+    candidates.push({ f, ext });
   }
+  // 读取文件头做魔数预检（异步），后端仍以 filetype 嗅探为最终准绳
+  await Promise.all(candidates.map(async ({ f, ext }) => {
+    try {
+      const head = new Uint8Array(await f.slice(0, 16).arrayBuffer());
+      const reason = magicMismatch(ext, detectMagic(head));
+      if (reason) { disguised++; toast(`已拦截：${f.name}（${reason}）`); return; }
+    } catch (_) { /* 读取失败不阻断，交给后端校验 */ }
+    const dup = filesData.some(x => x.name === f.name && x.size === f.size && x.file.lastModified === f.lastModified);
+    if (dup) { duplicated++; return; }
+    filesData.push({ name: f.name, file: f, size: f.size });
+  }));
   renderFileList();
   if (skipped) toast(`跳过 ${skipped} 个不支持或超过大小限制的文件`);
-  else if (duplicated) toast(`已忽略 ${duplicated} 个重复文件`);
+  else if (!disguised && duplicated) toast(`已忽略 ${duplicated} 个重复文件`);
   if (filesData.length > SCHEMA.limits.max_files) toast(`当前 ${filesData.length} 个文件，超过单次上限 ${SCHEMA.limits.max_files} 个，请移除部分文件`);
 }
 function renderFileList() {

@@ -182,6 +182,48 @@ class ConfigCoercionTests(unittest.TestCase):
         self.assertNotIn("unused_placeholder", html)
 
 
+class ContentSniffTests(unittest.TestCase):
+    """文件内容嗅探：非纯文本认不出不放行；纯文本需验证为文本才放行。"""
+
+    def test_docx_and_doc_allowed(self):
+        from docx import Document
+        buf = io.BytesIO()
+        Document().save(buf)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "real.docx"
+            p.write_bytes(buf.getvalue())
+            header = webapp._read_header(p)
+            self.assertEqual(webapp._detect_file_type(p), "docx")
+            self.assertIsNone(webapp._content_mismatch_reason(".docx", "docx", header))
+
+    def test_conflicting_content_rejected(self):
+        # .docx 后缀却是普通 zip / pdf / exe → 拦截
+        for detected in ("zip", "pdf", "exe", "png", "jpg", "xlsx"):
+            reason = webapp._content_mismatch_reason(".docx", detected, b"")
+            self.assertIsNotNone(reason, detected)
+            self.assertIn("不符", reason)
+        # 纯文本后缀出现任何二进制类型 → 拦截
+        for ext in (".txt", ".md"):
+            self.assertIsNotNone(webapp._content_mismatch_reason(ext, "exe", b"hello"))
+
+    def test_unrecognized_non_text_rejected(self):
+        # 非纯文本 filetype 认不出 → 不放行（.docx 无 zip 结构；.doc/.wps 无 OLE2 头）
+        self.assertIsNotNone(webapp._content_mismatch_reason(".docx", None, b"random binary"))
+        for ext in (".doc", ".wps"):
+            self.assertIsNotNone(webapp._content_mismatch_reason(ext, None, b"random binary"))
+            # 合法 OLE2 老格式兜底放行
+            self.assertIsNone(
+                webapp._content_mismatch_reason(ext, None, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 600)
+            )
+
+    def test_text_files(self):
+        self.assertIsNone(webapp._content_mismatch_reason(".txt", None, "中文内容\nhello".encode("utf-8")))
+        self.assertIsNone(webapp._content_mismatch_reason(".md", None, "# 标题\n正文".encode("gbk")))
+        # 含 NUL 字节 → 视为二进制，不放行
+        self.assertIsNotNone(webapp._content_mismatch_reason(".txt", None, b"\xff\xfe\x00\x01"))
+
+
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -307,6 +349,23 @@ class ApiTests(unittest.TestCase):
             "/api/format", {"config": "{}"}, [("files", "empty.txt", b"")],
         )
         self.assertEqual(status, 400)
+
+    def test_04b_disguised_extension_rejected(self):
+        # 改后缀伪装：内容实际是 pdf/exe/普通 zip，文件名却写成支持的后缀
+        disguises = [
+            ("fake.docx", b"%PDF-1.7\n%fake pdf"),
+            ("fake.txt", b"MZ\x90\x00\x03"),
+            ("fake.docx", b"PK\x03\x04" + b"\x00" * 60),  # 无 word/ 条目的普通 zip
+        ]
+        for filename, payload in disguises:
+            with self.subTest(filename=filename, payload=payload[:8]):
+                status, body, _ = _post_multipart(
+                    "/api/format", {"config": "{}"}, [("files", filename, payload)],
+                )
+                self.assertEqual(status, 400, body)
+                detail = json.loads(body)["detail"]
+                self.assertIn("没有可处理的文件", detail)
+                self.assertIn("不符", detail)
 
     def test_05_download_guards(self):
         cases = [
