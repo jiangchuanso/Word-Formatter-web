@@ -120,10 +120,15 @@ RE_MD_STRUCTURAL_LINE = re.compile(
 RE_MD_FENCE = re.compile(r'^\s*(?:```|~~~)')
 # 排版清洗：PDF 粘贴常在中日文与相邻中文/英文/数字之间插入多余空格
 _CJK_IDEOGRAPH = r'[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]'
+_CJK_PUNCT = r"[，。、；：！？（）〔〕【】《》「」『』“”‘’—…·,.!?;:()\[\]{}<>/\\|@#$%^&*+=~`\-\"']"
+_CJK_EDGE = rf'(?:{_CJK_IDEOGRAPH}|{_CJK_PUNCT})'
+# 中文语境下标点两侧的多余空格也要去掉；纯英文行不参与，避免误伤 "Cor-Ban 27L"。
 RE_CJK_SPACE_AFTER = re.compile(
-    rf'(?<={_CJK_IDEOGRAPH})[ \u3000]+(?={_CJK_IDEOGRAPH}|[A-Za-z0-9])'
+    rf'(?<={_CJK_EDGE})[ \u3000]+(?={_CJK_IDEOGRAPH}|[A-Za-z0-9]|{_CJK_PUNCT})'
 )
-RE_CJK_SPACE_BEFORE = re.compile(rf'(?<=[A-Za-z0-9])[ \u3000]+(?={_CJK_IDEOGRAPH})')
+RE_CJK_SPACE_BEFORE = re.compile(
+    rf'(?<=[A-Za-z0-9]|{_CJK_PUNCT})[ \u3000]+(?={_CJK_EDGE})'
+)
 # PDF 转换识别错误：外层自动编号转文字后又重复了一份相同序号（如「3. 3．标题」）
 RE_DUPLICATE_NUMBER = re.compile(
     r'^([0-9]{1,3})([.．])[ \t]*([0-9]{1,3})([.．])(?![0-9.．])[ \t]*(?=\S)'
@@ -224,6 +229,10 @@ MERGE_JIEBA_PROBE_SIZE = 6
 MERGE_HEADING_MIN_LENGTH = 12
 # 列表项被 PDF 断行后的短续行上限：「维护工作；」「使用标准；」这类词组尾部
 MERGE_LIST_TAIL_MAX_LENGTH = 12
+# 正文虚词断行：上一行以这些词收尾，或下一行以这些词开头，通常是同一句被拆开
+MERGE_FUNCTION_WORDS = frozenset(
+    '的 和 与 或 及 并 而 但 则 以 将 把 被 从 到 对 为 在 向 给 按 据 由 等'.split()
+)
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -1000,10 +1009,46 @@ class WordProcessor:
     # 排版清洗：多余空格与 PDF 双层序号（均在标题定级之前执行）
     # ------------------------------------------------------------------
     @staticmethod
-    def _remove_cjk_spaces_in_text(text):
-        """去掉中文与中文/英文/数字之间的空格，保留英文与英文、数字与数字间的空格。"""
+    def _leading_list_prefix_length(text):
+        """行首列表前缀（可叠加，如「- (1) 」）的长度，其中的空格必须保留。"""
         value = text or ''
-        return RE_CJK_SPACE_BEFORE.sub('', RE_CJK_SPACE_AFTER.sub('', value))
+        end = 0
+        while True:
+            match = RE_MD_LIST_PREFIX.match(value[end:])
+            if not match or match.end() == 0:
+                break
+            end += match.end()
+        return end
+
+    @classmethod
+    def _remove_cjk_spaces_in_text(cls, text):
+        """全角空格先统一成半角，再去掉中文语境下汉字/字母/数字/标点之间的空格。
+
+        纯英文行（无汉字）只把全角空格换成半角，不动原有半角空格，避免误伤
+        "Cor-Ban 27L"、"version 1.2" 这类英文数字组合。行首列表前缀的空格保留，
+        否则「2. (a) 内容」会被压成「2.(a)内容」而丢失列表结构。
+        """
+        value = (text or '').replace('\u3000', ' ')
+        if not RE_HAS_CHINESE.search(value):
+            return value
+        keep = cls._leading_list_prefix_length(value)
+        prefix, body = value[:keep], value[keep:]
+        return prefix + RE_CJK_SPACE_BEFORE.sub('', RE_CJK_SPACE_AFTER.sub('', body))
+
+    @classmethod
+    def _cjk_space_edits(cls, text):
+        """生成 Word 段落的文字改写区间：全角空格→半角、多余空格→空。"""
+        normalized = (text or '').replace('\u3000', ' ')
+        keep = cls._leading_list_prefix_length(normalized)
+        edits = {}
+        if RE_HAS_CHINESE.search(normalized):
+            for pattern in (RE_CJK_SPACE_AFTER, RE_CJK_SPACE_BEFORE):
+                for match in pattern.finditer(normalized, keep):
+                    edits[match.start()] = (match.start(), match.end(), '')
+        for index, char in enumerate(text or ''):
+            if char == '\u3000' and index not in edits:
+                edits[index] = (index, index + 1, ' ')
+        return sorted(edits.values())
 
     @classmethod
     def _remove_duplicate_numbering_in_text_line(cls, line):
@@ -1070,11 +1115,7 @@ class WordProcessor:
             if not self._cleanable_paragraph(para):
                 continue
             text, _ = self._paragraph_text_nodes(para)
-            edits = [
-                (match.start(), match.end(), '')
-                for pattern in (RE_CJK_SPACE_AFTER, RE_CJK_SPACE_BEFORE)
-                for match in pattern.finditer(text)
-            ]
+            edits = self._cjk_space_edits(text)
             if edits and self._apply_paragraph_text_edits(para, edits):
                 changes += 1
         return changes
@@ -2802,7 +2843,11 @@ class WordProcessor:
             if not cls._looks_like_heading_text(value):
                 return None
             depth = multi.group(1).count('.') + 1
-            return min(base + (depth - 1) + offset, MAX_TITLE_OUTLINE_LEVEL)
+            if depth >= 2:
+                # 多级点分编号层级固定：x.x→2、x.x.x→3、x.x.x.x→4、x.x.x.x.x→5。
+                # 不受「1.」基准级别或章/节顺延影响，避免传统标题体系下 x.x 被推到四级。
+                return min(depth, MAX_TITLE_OUTLINE_LEVEL)
+            return min(base + offset, MAX_TITLE_OUTLINE_LEVEL)
         # 单级编号 + 点（1. / A.）：保持原有三级标题约定，不加标题样判据
         if RE_HEADING_H3.match(value):
             return min(base + offset, MAX_TITLE_OUTLINE_LEVEL)
@@ -2819,18 +2864,16 @@ class WordProcessor:
 
     @classmethod
     def _apply_dotted_level_floor(cls, text, level):
-        """多级点分编号（x.x）段落的大纲级别下限：级别不得浅于编号深度。
+        """多级点分编号段落的大纲级别按深度固定：x.x→Lv2、x.x.x→Lv3、x.x.x.x→Lv4、x.x.x.x.x→Lv5。
 
-        1.1 → 至少 Lv2、1.1.1 → 至少 Lv3、1.1.1.1 → 至少 Lv4（封顶 MAX_TITLE_OUTLINE_LEVEL）；
-        编号推导或自带大纲级别已比下限更深时保持不变；单级编号（1. / 1标题）与正文（None）不受影响。
+        自带大纲级别/标题样式同样服从该固定层级，封顶 MAX_TITLE_OUTLINE_LEVEL；
+        单级编号（1. / 1标题）与正文（None）不受影响。
         """
         if level is None:
             return None
         depth = cls._dotted_number_depth(text)
         if depth >= 2:
-            floor = min(depth, MAX_TITLE_OUTLINE_LEVEL)
-            if level < floor:
-                return floor
+            return min(depth, MAX_TITLE_OUTLINE_LEVEL)
         return level
 
     def _dotted_style_heading_level(self, para, text):
@@ -2990,7 +3033,9 @@ class WordProcessor:
         if restart_level is not None:
             return min(restart_level + 1, MAX_TITLE_OUTLINE_LEVEL)
         if depth >= 2:
-            return min(self._dotted_base_level + depth, MAX_TITLE_OUTLINE_LEVEL)
+            # 多级点分编号层级固定为深度本身，其下游单级标号取下一级：
+            # x.x(L2)→L3、x.x.x(L3)→L4，不再叠加「1.」基准级别。
+            return min(depth + 1, MAX_TITLE_OUTLINE_LEVEL)
         return None
 
     def _prepare_single_number_restart(self, doc):
@@ -3036,7 +3081,7 @@ class WordProcessor:
                 if restart_level is not None and previous_value is not None and value > previous_value:
                     level = restart_level
                 elif value == 1 and depth >= 2:
-                    restart_level = min(self._dotted_base_level + depth, MAX_TITLE_OUTLINE_LEVEL)
+                    restart_level = min(depth + 1, MAX_TITLE_OUTLINE_LEVEL)
                     level = restart_level
                 else:
                     restart_level, previous_value = None, None
@@ -3382,7 +3427,13 @@ class WordProcessor:
             return True
         if prev_is_heading and len(prev_text.strip()) < MERGE_HEADING_MIN_LENGTH:
             return False
+        body = prev_text.strip()
         tail = next_text.strip()
+        if (not prev_is_list_item and body and tail
+                and not RE_NOTE_LINE.match(tail)
+                and (body[-1] in MERGE_FUNCTION_WORDS
+                     or tail[0] in MERGE_FUNCTION_WORDS)):
+            return True  # 正文虚词结尾/开头：PDF 断行把同一句拆成了两段
         if (prev_is_list_item
                 and tail and len(tail) <= MERGE_LIST_TAIL_MAX_LENGTH
                 and self._sentence_ends_at(tail)

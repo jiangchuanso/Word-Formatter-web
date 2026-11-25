@@ -648,15 +648,16 @@ class HeadingLevelPlanTests(unittest.TestCase):
     def test_numbered_heading_level_detection(self):
         self.assertEqual(WordProcessor._numbered_heading_level('一、总体要求'), 1)
         self.assertEqual(WordProcessor._numbered_heading_level('（一）工作要求'), 2)
-        # 点分多级编号按深度识别（以三级标题为基准逐级延伸）：
-        # 1./1.1./1.1.1./1.1.1.1. → L3/L4/L5/L6
+        # 单级编号保持三级标题约定；多级点分编号层级固定为深度本身：
+        # 1. → L3，x.x/x.x.x/x.x.x.x/x.x.x.x.x → L2/L3/L4/L5
         self.assertEqual(WordProcessor._numbered_heading_level('1. 方法'), 3)
         self.assertEqual(WordProcessor._numbered_heading_level('1) 方法'), 3)
         self.assertEqual(WordProcessor._numbered_heading_level('a) 方法'), 3)
         self.assertEqual(WordProcessor._numbered_heading_level('1）方法'), 3)
-        self.assertEqual(WordProcessor._numbered_heading_level('1.1. 方法'), 4)
-        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1. 方法'), 5)
-        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1.1. 方法'), 6)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1. 方法'), 2)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1. 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1.1. 方法'), 4)
+        self.assertEqual(WordProcessor._numbered_heading_level('1.1.1.1.1. 方法'), 5)
         self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
         self.assertEqual(WordProcessor._numbered_heading_level('（1）步骤'), 4)
         self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
@@ -813,14 +814,14 @@ class HeadingLevelPlanTests(unittest.TestCase):
         """点分编号识别应优先于段落既有样式/大纲级别（格式）。"""
         doc = Document()
         para = doc.add_paragraph('1.1.1. 三级条目')
-        # 段落带“标题 1”样式（格式=大纲 L1），但编号识别应为 L5（1.1.1. 深度3 -> L3+2），编号优先
+        # 段落带“标题 1”样式（格式=大纲 L1），但 1.1.1 层级固定为 L3，编号优先
         para.style = doc.styles['Heading 1']
         processor = WordProcessor(DEFAULT_CONFIG.copy())
         processor._prepare_chapter_section_offset(doc)
         records = processor._build_heading_records(doc)
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]['numbered_level'], 5)
-        self.assertEqual(records[0]['level'], 5)  # 编号优先于样式格式
+        self.assertEqual(records[0]['numbered_level'], 3)
+        self.assertEqual(records[0]['level'], 3)  # 编号优先于样式格式
 
 
 class ClearUnusedStylesTests(unittest.TestCase):
@@ -909,12 +910,12 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         self.assertIsNone(vals[3])
 
     def test_dotted_no_dot_under_traditional_keeps_levels(self):
-        # 有传统标题时，无尾点的 1.1 仍按三级体系顺延：1.=L3、1.1=L4
-        out = self._format(['一、总体', '正文甲', '1事项', '1.1子项', '正文乙'])
+        # 有传统标题时，单级 1. 仍为 L3；多级 1.1 固定为 L2
+        out = self._format(['一、总体', '正文甲', '1事项', '事项正文。', '1.1子项', '正文乙'])
         paras = [p for p in out.paragraphs if p.text.strip()]
         self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
         self.assertEqual(self._outline_val(paras[2]), 2)   # 1 = L3
-        self.assertEqual(self._outline_val(paras[3]), 3)   # 1.1 = L4
+        self.assertEqual(self._outline_val(paras[4]), 1)   # 1.1 = L2
 
     def test_single_number_restart_under_dotted_is_next_level(self):
         # x.x.x 下游从 1 重新起头的连续编号（1./2.）应作为其下一级（L4），不得又提为一级标题
@@ -973,12 +974,12 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         self.assertEqual(self._outline_val(paras[5]), 3)   # 2. → 回到 L4
 
     def test_paren_number_under_traditional_dotted_heading(self):
-        # 传统标题体系下 1.1（L4）之后的（1）同样取下一级 L5
+        # 传统标题体系下 1.1 固定 L2，其后的（1）取下一级 L3
         out = self._format(['一、总体要求', '1.1 子项', '（1）细项', '细项正文。'])
         paras = [p for p in out.paragraphs if p.text.strip()]
         self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
-        self.assertEqual(self._outline_val(paras[1]), 3)   # 1.1 → L4
-        self.assertEqual(self._outline_val(paras[2]), 4)   # （1）→ L5
+        self.assertEqual(self._outline_val(paras[1]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[2]), 2)   # （1）→ L3
 
     def test_paren_number_without_dotted_context_stays_level4(self):
         # 没有多级编号上下文时，（1）仍按四级标题处理
@@ -1060,8 +1061,8 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
         self.assertEqual(self._outline_val(paras[1]), 2)   # 1.1.1 至少 L3
 
-    def test_dotted_keeps_deeper_own_outline(self):
-        # 自带大纲级别比编号深度下限更深时保持自带级别：1.1 + 标题4 → L4
+    def test_dotted_fixes_even_deeper_own_outline(self):
+        # 多级点分编号层级固定：1.1 即使自带标题 4 样式也按 L2
         def build(doc):
             doc.add_paragraph('一、总体要求')
             p = doc.add_paragraph('1.1 本条款说明总体目标与适用范围，并列举具体事项以便验证。')
@@ -1069,7 +1070,7 @@ class StructuralHeadingLevelTests(unittest.TestCase):
             doc.add_paragraph('这是正文内容。')
         out = self._format_doc(build)
         paras = [p for p in out.paragraphs if p.text.strip()]
-        self.assertEqual(self._outline_val(paras[1]), 3)   # 1.1 保持 L4
+        self.assertEqual(self._outline_val(paras[1]), 1)   # 1.1 固定 L2
 
     def test_dotted_without_outline_stays_body(self):
         # 无大纲级别/标题样式的 x.x 长文本仍是正文，不受下限规则影响
@@ -1874,6 +1875,26 @@ class TextCleanupTests(unittest.TestCase):
         self.assertEqual(clean('English text 3 中'), 'English text 3中')
         self.assertEqual(clean('中\u3000文'), '中文')
         self.assertEqual(clean('English text 3 4'), 'English text 3 4')
+
+    def test_space_cleanup_includes_punctuation_and_fullwidth_space(self):
+        clean = WordProcessor._remove_cjk_spaces_in_text
+        self.assertEqual(clean('航 空 器 ， 维 修 ；'), '航空器，维修；')
+        self.assertEqual(clean('中\u3000文 （ 说明 ）'), '中文（说明）')
+        self.assertEqual(clean('图 1-1 内话 耳机'), '图1-1内话耳机')
+        self.assertEqual(clean('Cor-Ban 27L 油脂'), 'Cor-Ban 27L油脂')
+
+    def test_body_function_word_break_is_merged(self):
+        source = (
+            '这是维修工作的\n'
+            '基本方法与要求。\n'
+            '另外一段完整说明。\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            merge_continuous_lines=True,
+        ))
+        self.assertIn('这是维修工作的基本方法与要求。', content)
+        self.assertIn('另外一段完整说明。', content)
 
     def test_duplicate_number_text_rules(self):
         clean = WordProcessor._remove_duplicate_numbering_in_text_line
