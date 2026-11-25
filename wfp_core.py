@@ -2908,11 +2908,16 @@ class WordProcessor:
         entries = []
         for para in doc.paragraphs:
             text = para.text.strip()
+            # 含图像的段落本身不参与文本合并，但也不再作为隔断：PDF 粘贴常把
+            # 图像插在一句话中间，后续文字仍需与前半句合并；图像段落原样保留。
+            if self._has_drawing_or_pict(para) or self._has_embedded_object(para):
+                entries.append((para, text, False, True))
+                continue
+            if not text:
+                entries.append(None)
+                continue
             if (
-                not text
-                or self._has_drawing_or_pict(para)
-                or self._has_embedded_object(para)
-                or not self._paragraph_is_plain_runs(para)
+                not self._paragraph_is_plain_runs(para)
                 or self._get_paragraph_alignment(para)
                 in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
             ):
@@ -2924,34 +2929,42 @@ class WordProcessor:
             if heading_like and len(text) < MERGE_HEADING_MIN_LENGTH:
                 entries.append(None)
                 continue
-            entries.append((para, text, heading_like))
+            entries.append((para, text, heading_like, False))
 
         paragraphs = [entry[0] if entry is not None else None for entry in entries]
         merged_paragraphs = merged_lines = 0
         index, total = 0, len(entries)
         while index < total:
-            if entries[index] is None:
+            if entries[index] is None or entries[index][3]:
                 index += 1
                 continue
 
             end = index
-            while (
-                end + 1 < total
-                and entries[end + 1] is not None
-                and self._is_continuous_pair(
-                    entries[end][1], entries[end + 1][1],
+            skip = set()  # 图像段落：跳过其文字判定，但保留在文档中
+            scan = index + 1
+            while scan < total:
+                candidate = entries[scan]
+                if candidate is None:
+                    break
+                if candidate[3]:
+                    skip.add(scan)
+                    scan += 1
+                    continue
+                if not self._is_continuous_pair(
+                    entries[end][1], candidate[1],
                     prev_is_heading=entries[end][2],
-                )
-            ):
-                end += 1
+                ):
+                    break
+                end = scan
+                scan += 1
 
             if end > index:
                 preview = entries[index][1][:30].replace("\n", " ")
-                self._merge_paragraph_range(paragraphs, index, end)
+                self._merge_paragraph_range(paragraphs, index, end, skip)
                 merged_paragraphs += 1
-                merged_lines += end - index
+                merged_lines += end - index - len(skip)
                 self._log(
-                    f"  > 合并 {end - index + 1} 行为一段（前后行词语连续）: \"{preview}...\""
+                    f"  > 合并 {end - index + 1 - len(skip)} 行为一段（前后行词语连续）: \"{preview}...\""
                 )
             index = end + 1
 
@@ -2962,14 +2975,17 @@ class WordProcessor:
         return merged_lines
 
     @staticmethod
-    def _merge_paragraph_range(all_paragraphs, start, end):
-        """把 [start, end] 区间的段落内容合并进第一段，并删除其余段落。"""
+    def _merge_paragraph_range(all_paragraphs, start, end, skip=()):
+        """把 [start, end] 区间的段落内容合并进第一段，并删除其余段落。
+
+        skip 中的下标对应的段落原样保留（图像段落），不会被并入也不会被删除。
+        """
         if end <= start:
             return
         first = all_paragraphs[start]
         first_p = first._p
-        for para in all_paragraphs[start + 1:end + 1]:
-            if para is None:
+        for offset, para in enumerate(all_paragraphs[start + 1:end + 1], start=start + 1):
+            if para is None or offset in skip:
                 continue
             runs = list(para.runs)
             if first.runs:

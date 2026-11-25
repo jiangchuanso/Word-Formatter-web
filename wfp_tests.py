@@ -1573,6 +1573,51 @@ class ContinuousLineMergeTests(unittest.TestCase):
                 f"实际: {texts}",
             )
 
+    def test_image_paragraph_does_not_break_merge_and_is_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "image.docx", root / "image_out.docx"
+            doc = Document()
+            doc.add_paragraph(self.SPLIT_HEAD)
+            _add_drawing(doc.add_paragraph())
+            doc.add_paragraph(self.SPLIT_TAIL)
+            doc.save(source)
+
+            texts = self._run(source, output)
+            self.assertIn(self.SPLIT_HEAD + self.SPLIT_TAIL, texts, f"实际: {texts}")
+            drawings = list(Document(output).element.body.iter(qn('w:drawing')))
+            self.assertEqual(len(drawings), 1, "图像必须保留")
+
+    def test_multiple_image_paragraphs_are_transparent(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "images.docx", root / "images_out.docx"
+            doc = Document()
+            doc.add_paragraph(self.SPLIT_HEAD)
+            _add_drawing(doc.add_paragraph())
+            _add_drawing(doc.add_paragraph())
+            doc.add_paragraph(self.SPLIT_TAIL)
+            doc.save(source)
+
+            texts = self._run(source, output)
+            self.assertIn(self.SPLIT_HEAD + self.SPLIT_TAIL, texts, f"实际: {texts}")
+            drawings = list(Document(output).element.body.iter(qn('w:drawing')))
+            self.assertEqual(len(drawings), 2, "两张图像都必须保留")
+
+    def test_sentence_end_still_blocks_across_image(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "image_stop.docx", root / "image_stop_out.docx"
+            doc = Document()
+            doc.add_paragraph('第一段内容已经结束。')
+            _add_drawing(doc.add_paragraph())
+            doc.add_paragraph('第二段另行开始描述。')
+            doc.save(source)
+
+            texts = self._run(source, output)
+            self.assertEqual(texts, ['第一段内容已经结束。', '第二段另行开始描述。'])
+            self.assertEqual(len(list(Document(output).element.body.iter(qn('w:drawing')))), 1)
+
     def test_feature_disabled_leaves_broken_lines(self):
         with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
             root = Path(tmpdir)
