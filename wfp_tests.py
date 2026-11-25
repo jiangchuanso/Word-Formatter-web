@@ -1701,6 +1701,30 @@ class KeepSourceExtensionTests(unittest.TestCase):
             self.assertIn(self.HEAD + self.TAIL, content, "断行应被合并")
             self.assertNotIn(self.TAIL + "\n", content.replace(self.HEAD + self.TAIL, ""))
 
+    def test_intro_paragraph_broken_lines_are_merged(self):
+        source = (
+            "## 内容简介\n"
+            "本书为民用航空器维修基础系列教材之一。全书分为三部分：第一部分是勤务和航线检查，"
+            "第二部分是故障和缺陷处理，第三部分是航线可更换件拆装。在编写过程中，"
+            "注重知识实用性且遵循通俗易懂的原则，以理论结合实际的方式落地。"
+            "同时，避免深奥和复杂的理论，强调定性描述航空器维修基础知识和实作培训大纲中"
+            "要求掌握的基本知识点，着眼于基础能\n"
+            "力培养和维修相关技能点在实际维修场景中的应用。\n"
+            "本教材不仅可以作为航空维修相关院校和CCAR-147维修培训机构的培训教材或参考资\n"
+            "料，也可以作为已具备一定基础的飞机维修专业人员的学习用书。\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source_path, output = root / "input.md", root / "output.md"
+            source_path.write_text(source, encoding="utf-8")
+            self._run(source_path, output, {
+                'keep_source_extension': True,
+                'merge_continuous_lines': True,
+            })
+            content = output.read_text(encoding="utf-8")
+            self.assertIn("着眼于基础能力培养", content, "jieba 跨词断行应被合并")
+            self.assertIn("参考资料", content, "「参考资」+「料」断行应被合并")
+
     def test_md_list_item_continuation_is_merged(self):
         # 列表项只应保护前缀，正文里的断行仍要合并；不同列表项之间不得互相合并
         with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
