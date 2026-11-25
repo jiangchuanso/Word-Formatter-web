@@ -1701,6 +1701,33 @@ class KeepSourceExtensionTests(unittest.TestCase):
             self.assertIn(self.HEAD + self.TAIL, content, "断行应被合并")
             self.assertNotIn(self.TAIL + "\n", content.replace(self.HEAD + self.TAIL, ""))
 
+    def test_md_list_item_continuation_is_merged(self):
+        # 列表项只应保护前缀，正文里的断行仍要合并；不同列表项之间不得互相合并
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.md"
+            source.write_text(
+                "- (1) 发动机引气正常时从压气级第五级引出，高压九级接\n"
+                "替供气。\n"
+                "- (2) 第一项内容。\n"
+                "- (3) 第二项内容。\n",
+                encoding="utf-8",
+            )
+            output = root / "output.md"
+            self._run(source, output, {
+                'keep_source_extension': True,
+                'merge_continuous_lines': True,
+            })
+
+            lines = output.read_text(encoding="utf-8").splitlines()
+            self.assertIn(
+                "- (1) 发动机引气正常时从压气级第五级引出，高压九级接替供气。", lines,
+                f"列表项内的断行应被合并，实际: {lines}",
+            )
+            self.assertIn("- (2) 第一项内容。", lines)
+            self.assertIn("- (3) 第二项内容。", lines)
+            self.assertEqual(len(lines), 3, "不同列表项不能合并为一项")
+
     def test_txt_output_keeps_extension(self):
         with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
             root = Path(tmpdir)

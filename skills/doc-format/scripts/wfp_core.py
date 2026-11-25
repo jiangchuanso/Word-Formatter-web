@@ -88,7 +88,16 @@ RE_MD_UNORDERED_LIST_BLOCK = re.compile(r'^\s*[*+-]\s+')
 RE_MD_UNORDERED_LIST = re.compile(r'^\s*[*+-]\s')
 RE_MD_BULLET_WITH_CONTENT = re.compile(r'^(\s*[*+-]\s)(.*)')
 RE_MD_EMPHASIS_ASTERISK = re.compile(r'(?<!\\)\*([^\s*][^*]*?)(?<!\\)\*')
-# 文本源文件保持后缀输出时，这些行的 Markdown 结构必须原样保留，不参与合并/标点修复
+# 文本源文件保持后缀输出时，这些行的 Markdown 结构本身必须原样保留。
+# 注意：列表项只保护前缀，列表正文仍需参与断行合并，否则列表项内被 PDF/docling
+# 拆开的续行永远无法还原（曾经把整行排除，导致只有十余处断行被合并）。
+RE_MD_PROTECTED_LINE = re.compile(
+    r'^\s*(?:#{1,6}\s|>\s?|\|>|```|~~~|---+\s*$|\*\*\*\s*$|___\s*$|<\/?[A-Za-z])'
+)
+RE_MD_LIST_PREFIX = re.compile(
+    r'^(\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|[（(][A-Za-z0-9]{1,3}[）)]\s*))'
+)
+# 兼容旧调用点：整行结构保护（含列表前缀），仅用于不需要处理列表正文的场景
 RE_MD_STRUCTURAL_LINE = re.compile(
     r'^\s*(?:#{1,6}\s|>\s?|[-*+]\s|\d+[.)]\s|\|>|```|---+\s*$|\*\*\*\s*$|___\s*$|<\/?[A-Za-z])'
 )
@@ -4228,39 +4237,58 @@ class WordProcessor:
             return left + ' ' + right
         return left + right
 
+    @staticmethod
+    def _md_list_parts(line, source_ext):
+        """拆分 Markdown 列表前缀与正文；非列表行前缀为空。"""
+        value = line or ''
+        if source_ext != '.md':
+            return '', value.strip()
+        match = RE_MD_LIST_PREFIX.match(value)
+        if not match:
+            return '', value.strip()
+        return match.group(1), value[match.end():].strip()
+
     def _text_line_is_mergeable(self, line, source_ext):
-        """文本输出时，空行与 Markdown 结构行作为硬边界，不参与断行合并。"""
+        """空行与 Markdown 标题/表格/围栏等结构行是硬边界；列表项只保护前缀。"""
         value = (line or '').strip()
         if not value:
             return False
-        if source_ext == '.md' and RE_MD_STRUCTURAL_LINE.match(line):
+        if source_ext == '.md' and RE_MD_PROTECTED_LINE.match(line):
             return False
+        prefix, body = self._md_list_parts(line, source_ext)
+        if prefix:
+            return bool(body)
         return not self._is_heading_like_text(value)
 
     def _merge_text_lines(self, text, source_ext):
         """在纯文本上执行与 docx 相同的“前后行词语连续合并”。"""
         lines = text.split('\n')
+        entries = [
+            (*self._md_list_parts(line, source_ext), self._text_line_is_mergeable(line, source_ext))
+            for line in lines
+        ]
         result = []
         index, total = 0, len(lines)
         merged_lines = 0
         while index < total:
-            if not self._text_line_is_mergeable(lines[index], source_ext):
+            if not entries[index][2]:
                 result.append(lines[index])
                 index += 1
                 continue
 
             end = index
-            while (
-                end + 1 < total
-                and self._text_line_is_mergeable(lines[end + 1], source_ext)
-                and self._is_continuous_pair(lines[end], lines[end + 1])
-            ):
+            while end + 1 < total:
+                next_prefix, next_body, next_mergeable = entries[end + 1]
+                if not next_mergeable or next_prefix:
+                    break  # 下一个列表项是独立条目，不与前一项合并
+                if not self._is_continuous_pair(entries[end][1], next_body):
+                    break
                 end += 1
 
             if end > index:
                 combined = lines[index]
-                for nxt in lines[index + 1:end + 1]:
-                    combined = self._join_text_lines(combined, nxt)
+                for nxt in range(index + 1, end + 1):
+                    combined = self._join_text_lines(combined, entries[nxt][1])
                 result.append(combined)
                 merged_lines += end - index
             else:
@@ -4274,15 +4302,17 @@ class WordProcessor:
         """保持 txt/md 后缀输出：应用全部非格式化清洗，跳过 Word 专属排版。"""
         text = self._read_text_file(input_path)
         applied = []
+        # 先清掉 docling 叠在续行前的页面序号，否则这些续行会被当成独立列表项，
+        # 断行合并阶段就无法把它们接回上一行。
+        if self.config.get('remove_duplicate_numbering', False):
+            text = self._remove_duplicate_numbering_in_text(text, source_ext)
+            applied.append("冗余序号清理")
         if self.config.get('merge_continuous_lines', False):
             text = self._merge_text_lines(text, source_ext)
             applied.append("前后行词语连续合并")
         if self.config.get('normalize_punctuation', False):
             text = self._normalize_text_symbols(text, source_ext)
             applied.append("符号标准化")
-        if self.config.get('remove_duplicate_numbering', False):
-            text = self._remove_duplicate_numbering_in_text(text, source_ext)
-            applied.append("冗余序号清理")
         if self.config.get('remove_cjk_spaces', False):
             text = self._apply_text_cleanup(text, source_ext, self._remove_cjk_spaces_in_text)
             applied.append("中英文/数字间多余空格清理")
