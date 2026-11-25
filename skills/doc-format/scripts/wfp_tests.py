@@ -51,6 +51,20 @@ class TextNormalizationTests(unittest.TestCase):
             "version 1.2",
         )
 
+    def test_markdown_inline_syntax_keeps_halfwidth_punctuation(self):
+        processor = WordProcessor(DEFAULT_CONFIG)
+        source = (
+            '！[Image]（图/a.png）\n'
+            '![Image](图/b.png)\n'
+            '说明,[链接](https://example.com/中文)；\n'
+            '代码`a,b`结束.\n'
+        )
+        result = processor._normalize_text_symbols(source, '.md')
+        self.assertIn('![Image](图/a.png)', result)
+        self.assertIn('![Image](图/b.png)', result)
+        self.assertIn('说明，[链接](https://example.com/中文)；', result)
+        self.assertIn('代码`a,b`结束。', result)
+
     def test_markdown_cleaning(self):
         raw = "# 标题\n**粗体** 和 [链接](https://example.com)\n![图片](a.png)\n> 引用"
         cleaned = WordProcessor._clean_markdown(raw)
@@ -1872,6 +1886,20 @@ class TextCleanupTests(unittest.TestCase):
         self.assertEqual(clean('1. 1.1 子项'), '1. 1.1 子项')
         self.assertEqual(clean('1. 俯身检查胎面'), '1. 俯身检查胎面')
 
+    def test_md_image_syntax_survives_symbol_normalization(self):
+        source = (
+            '！[Image]（M8_artifacts/image_000.png）\n'
+            '正文说明,图片如下.\n'
+            '![Image](M8_artifacts/image_001.png)\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            normalize_punctuation=True,
+        ))
+        self.assertIn('![Image](M8_artifacts/image_000.png)', content)
+        self.assertIn('正文说明，图片如下。', content)
+        self.assertIn('![Image](M8_artifacts/image_001.png)', content)
+
     def test_docx_space_cleanup_crosses_runs(self):
         def build(doc):
             para = doc.add_paragraph()
@@ -1939,8 +1967,7 @@ class TextCleanupTests(unittest.TestCase):
         texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
         self.assertEqual(texts, [
             '(1) 执行以下步骤，安装轮毂罩：',
-            '(a) 转动防滞传感器止块，使驱动器和止块',
-            '连接；',
+            '(a) 转动防滞传感器止块，使驱动器和止块连接；',
             '(b) 将轮毂罩放到机轮组件上；',
             '警告：不要将手指放入减重孔中。',
         ])
@@ -2003,6 +2030,52 @@ class TextCleanupTests(unittest.TestCase):
         self.assertIn('(a) 拆下固定轮轴螺帽[16]的两个螺帽[8]；', content)
         self.assertNotIn('2. (a)', content)
         self.assertNotIn('5. (a)', content)
+
+    def test_docling_jump_numbers_restore_continued_lines(self):
+        # 用户原文第 1544-1552 行：4./6./8. 是页面计数器叠在续行上的假序号，
+        # 真实的 4./5./6. 必须保留，续行要接回被截断的上一行。
+        source = (
+            '1. 确保航空器燃油中的水分充分沉淀后，再放沉淀，例如：737-800型需要停放4小时；\n'
+            '2. 排放规定容量的燃油后，使用清洁的油样瓶从燃油箱取油样；\n'
+            '3. 目视检查油样，确保燃油清洁、透明。燃油中有水分表现为油液有一层沉淀物或小\n'
+            '4. 水泡，微生物、冰晶等杂质表现为燃油浑浊；\n'
+            '4. 若水分检查结果不符合要求，应继续放燃油沉淀、进行油样检查，直至油样符合要\n'
+            '6. 求。如油样仍无法满足要求，需报告；\n'
+            '5. 若发现航空器燃油中有外来物、微生物或变色等异常现象，应依据维修手册执行后\n'
+            '8. 续工作；\n'
+            '6. 油样检查合格后，封存备查。\n'
+        )
+        expected = [
+            '1. 确保航空器燃油中的水分充分沉淀后，再放沉淀，例如：737-800型需要停放4小时；',
+            '2. 排放规定容量的燃油后，使用清洁的油样瓶从燃油箱取油样；',
+            '3. 目视检查油样，确保燃油清洁、透明。燃油中有水分表现为油液有一层沉淀物或小水泡，微生物、冰晶等杂质表现为燃油浑浊；',
+            '4. 若水分检查结果不符合要求，应继续放燃油沉淀、进行油样检查，直至油样符合要求。如油样仍无法满足要求，需报告；',
+            '5. 若发现航空器燃油中有外来物、微生物或变色等异常现象，应依据维修手册执行后续工作；',
+            '6. 油样检查合格后，封存备查。',
+        ]
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_duplicate_numbering=True,
+            merge_continuous_lines=True,
+        ))
+        self.assertEqual([line.strip() for line in content.splitlines() if line.strip()], expected)
+
+    def test_docx_docling_jump_numbers_restore_continued_lines(self):
+        lines = [
+            '3. 目视检查油样，确保燃油清洁、透明。燃油中有水分表现为油液有一层沉淀物或小',
+            '4. 水泡，微生物、冰晶等杂质表现为燃油浑浊；',
+            '4. 若水分检查结果不符合要求，应继续放燃油沉淀、进行油样检查，直至油样符合要',
+            '6. 求。如油样仍无法满足要求，需报告；',
+        ]
+        out = self._run_docx(lines, self._cfg(
+            remove_duplicate_numbering=True,
+            merge_continuous_lines=True,
+        ))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '3. 目视检查油样，确保燃油清洁、透明。燃油中有水分表现为油液有一层沉淀物或小水泡，微生物、冰晶等杂质表现为燃油浑浊；',
+            '4. 若水分检查结果不符合要求，应继续放燃油沉淀、进行油样检查，直至油样符合要求。如油样仍无法满足要求，需报告；',
+        ])
 
     def test_cleanup_before_heading_leveling(self):
         dirty = ['3. 3．航空器移动后，应再次执行轮胎检查；', '这是正文。']

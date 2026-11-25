@@ -80,6 +80,13 @@ RE_MD_IMAGE = re.compile(r'!\[([^\]]*)\]\([^)]+\)')
 RE_MD_LINK = re.compile(r'\[([^\]]+)\]\([^)]+\)')
 RE_MD_HTML_TAG = re.compile(r'<[^>]+>')
 RE_MD_INLINE_CODE = re.compile(r'`([^`]+)`')
+# Markdown 行内控制语法：其中的半角标点属于语法本身，符号标准化不能改成全角。
+RE_MD_INLINE_SYNTAX = re.compile(
+    r'`[^`\n]+`|!?\[[^\]\n]*\]\([^)\n]*\)|!?\[[^\]\n]*\]\[[^\]\n]*\]'
+)
+RE_MD_PLACEHOLDER = re.compile(r'\x00(\d+)\x00')
+# 历史输出里图片语法曾被整体全角化，保留窄口径修复：只认「！[Image]（…）」。
+RE_MD_FULLWIDTH_IMAGE = re.compile(r'！\[Image\]（([^）\n]*)）')
 RE_MD_BOLD_ASTERISK = re.compile(r'\*\*(.*?)\*\*')
 RE_MD_BOLD_UNDERSCORE = re.compile(r'__(.*?)__')
 RE_MD_HEADER = re.compile(r'^\s*#+\s+(.*)')
@@ -869,6 +876,26 @@ class WordProcessor:
         result = cls._normalize_simple_punctuation(result)
         return result
 
+    @staticmethod
+    def _restore_markdown_syntax_punctuation(text):
+        """修复历史上被全角化的 Markdown 图片语法，只动明确的 `！[Image]（…）`。"""
+        return RE_MD_FULLWIDTH_IMAGE.sub(r'![Image](\1)', text)
+
+    @staticmethod
+    def _stash_markdown_syntax(text):
+        """把行内控制语法换成等长语义的占位符，避免符号标准化破坏渲染。"""
+        spans = []
+
+        def stash(match):
+            spans.append(match.group(0))
+            return '\x00%d\x00' % (len(spans) - 1)
+
+        return RE_MD_INLINE_SYNTAX.sub(stash, text), spans
+
+    @staticmethod
+    def _restore_markdown_syntax(text, spans):
+        return RE_MD_PLACEHOLDER.sub(lambda match: spans[int(match.group(1))], text)
+
     def _normalize_paragraph_symbols(self, para):
         if self._has_field_codes(para) or self._paragraph_has_ooxml(para, 'w:fldSimple'):
             return False
@@ -1096,10 +1123,13 @@ class WordProcessor:
                         result.add(index)
                     break
 
-        # 同一页面计数器也会叠到警告/说明和续行上。仅在已确认存在 docling
-        # 叠加证据（上面的字母子标号被清理）时才处理，避免误伤正常编号列表。
-        if not result:
-            return result
+        # 字母子标号的证据只在本轮内沿用，避免纯数字续行被清掉后把后面的
+        # 真实序号「4. 若水分…」「5. 若发现…」级联误删。
+        alpha_result = set(result)
+        numeric_cont = cls._numbered_continuation_indices(lines, skipped)
+        result |= numeric_cont
+
+        # 同一页面计数器也会叠到警告/说明行上。
         for index, line in enumerate(lines):
             if index in skipped or index in result:
                 continue
@@ -1112,16 +1142,63 @@ class WordProcessor:
             if RE_NOTE_LINE.match(body):
                 result.add(index)
                 continue
+            if not alpha_result:
+                continue  # 无字母子标号证据时不凭裸父项猜数字，避免误删真实编号
             for previous in range(index - 1, max(-1, index - 4), -1):
                 if previous in skipped or not lines[previous].strip():
                     continue
-                if (previous in result
+                if (previous in alpha_result
                         or RE_BARE_PAREN_LABEL.match(lines[previous])
                         or RE_BARE_NUM_PAREN_LABEL.match(lines[previous])
                         or RE_LEADING_NUMBER_WITH_ALPHA.match(lines[previous])):
                     result.add(index)
                 break
         return result
+
+    @classmethod
+    def _numbered_continuation_indices(cls, lines, skipped=()):
+        """行首序号叠在前行断行续文上的行号（纯数字列表场景）。
+
+        单独成方法，供冗余序号清理和续行合并共用：这里确认过的续行必须直接
+        接回上一行，否则 jieba 跨词判据未必能识别「小」+「水泡」这类拼接。
+        """
+        result = set()
+        for index, line in enumerate(lines):
+            if index in skipped or RE_DUPLICATE_NUMBER.match(line):
+                continue
+            prefix = RE_PAGE_NUMBER_PREFIX.match(line)
+            if not prefix or RE_NOTE_LINE.match(line[prefix.end():]):
+                continue
+            for previous in range(index - 1, max(-1, index - 4), -1):
+                if previous in skipped or not lines[previous].strip():
+                    continue
+                if cls._numbered_continuation_prefix(lines[previous], line):
+                    result.add(index)
+                break
+        return result
+
+    @staticmethod
+    def _numbered_continuation_prefix(prev_line, curr_line):
+        """判断当前行的行首数字是否是叠在前行断行续文上的页面序号，返回要删的前缀长度。
+
+        典型场景：前行「3. …沉淀物或小」无标点收尾，下一行「4. 水泡，…；」
+        以句末标点收尾，序号还向前跳跃（4→6、5→8 等）。这类数字来自页面级
+        计数器，应删除后让断行合并把两段接回一行。
+        """
+        prev_prefix = RE_PAGE_NUMBER_PREFIX.match(prev_line)
+        curr_prefix = RE_PAGE_NUMBER_PREFIX.match(curr_line)
+        if not prev_prefix or not curr_prefix:
+            return 0
+        if int(curr_prefix.group(1)) <= int(prev_prefix.group(1)):
+            return 0  # 假序号总是向前叠加；回退/持平是真实列表项接续
+        prev_body = prev_line[prev_prefix.end():]
+        curr_body = curr_line[curr_prefix.end():]
+        if WordProcessor._sentence_ends_at(prev_body) or not WordProcessor._sentence_ends_at(curr_body):
+            return 0
+        prev_last = prev_body.strip().rstrip(MERGE_SENTENCE_END_CLOSERS).rstrip()[-1:]
+        if prev_last in MERGE_CONNECTING_PUNCTUATION:
+            return 0  # 逗号类收尾是明确续行，交给断行合并处理，不必动序号
+        return curr_prefix.end()
 
     def _remove_duplicate_numbering_in_document(self, doc):
         paragraphs = list(self._iter_document_paragraphs(doc))
@@ -1143,25 +1220,50 @@ class WordProcessor:
             ):
                 changes += 1
 
-        for index in self._spurious_leading_number_indices(texts):
+        spurious = self._spurious_leading_number_indices(texts)
+        numeric_cont = self._numbered_continuation_indices(texts)
+        for index in sorted(spurious):
             para = paragraphs[index]
             if not self._cleanable_paragraph(para):
                 continue
             prefix = (RE_LEADING_NUMBER_WITH_ALPHA.match(texts[index])
                       or RE_PAGE_NUMBER_PREFIX.match(texts[index]))
-            if prefix and self._apply_paragraph_text_edits(para, [(0, prefix.end(), '')]):
+            if not prefix:
+                continue
+            if self._apply_paragraph_text_edits(para, [(0, prefix.end(), '')]):
                 changes += 1
+            if index in numeric_cont and index:
+                previous = paragraphs[index - 1]
+                if (previous is not None
+                        and previous._p.getparent() is para._p.getparent()
+                        and self._cleanable_paragraph(previous)
+                        and self._paragraph_is_plain_runs(previous)
+                        and self._paragraph_is_plain_runs(para)):
+                    self._merge_paragraph_range(paragraphs, index - 1, index)
         return changes
 
     def _remove_duplicate_numbering_in_text(self, text, source_ext):
         lines = [self._remove_duplicate_numbering_in_text_line(line) for line in text.split('\n')]
         skipped = self._md_fence_line_indices(lines, source_ext)
-        for index in self._spurious_leading_number_indices(lines, skipped):
-            prefix = (RE_LEADING_NUMBER_WITH_ALPHA.match(lines[index])
-                      or RE_PAGE_NUMBER_PREFIX.match(lines[index]))
-            if prefix:
-                lines[index] = lines[index][prefix.end():]
-        return '\n'.join(lines)
+        spurious = self._spurious_leading_number_indices(lines, skipped)
+        numeric_cont = self._numbered_continuation_indices(lines, skipped)
+        result = []
+        for index, line in enumerate(lines):
+            if index not in spurious:
+                result.append(line)
+                continue
+            prefix = (RE_LEADING_NUMBER_WITH_ALPHA.match(line)
+                      or RE_PAGE_NUMBER_PREFIX.match(line))
+            if not prefix:
+                result.append(line)
+                continue
+            body = line[prefix.end():]
+            if (index in numeric_cont and index and (index - 1) not in skipped
+                    and result and self._text_line_is_mergeable(result[-1], source_ext)):
+                result[-1] = self._join_text_lines(result[-1], body)
+            else:
+                result.append(body)
+        return '\n'.join(result)
 
     def _apply_text_cleanup(self, text, source_ext, transform):
         """逐行应用文本清洗，Markdown 围栏代码块原样保留。"""
@@ -1175,13 +1277,20 @@ class WordProcessor:
         return '\n'.join(result)
 
     def _normalize_text_symbols(self, text, source_ext):
-        return self._apply_text_cleanup(
-            text,
-            source_ext,
-            lambda line: line
-            if source_ext == '.md' and RE_MD_STRUCTURAL_LINE.match(line)
-            else self._normalize_symbols_in_text(line),
-        )
+        def normalize_line(line):
+            if source_ext != '.md':
+                return self._normalize_symbols_in_text(line)
+            line = self._restore_markdown_syntax_punctuation(line)
+            if RE_MD_STRUCTURAL_LINE.match(line):
+                return line
+            protected, spans = self._stash_markdown_syntax(line)
+            if not spans:
+                return self._normalize_symbols_in_text(line)
+            return self._restore_markdown_syntax(
+                self._normalize_symbols_in_text(protected), spans
+            )
+
+        return self._apply_text_cleanup(text, source_ext, normalize_line)
 
     # ------------------------------------------------------------------
     # Markdown cleanup
