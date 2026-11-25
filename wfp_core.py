@@ -105,6 +105,14 @@ RE_MD_PROTECTED_LINE = re.compile(
 RE_MD_LIST_PREFIX = re.compile(
     r'^(\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|[（(][A-Za-z0-9]{1,3}[）)]\s*))'
 )
+# 列表项编号本体，用于识别「连续编号中唯一没有段尾标点的一项」
+RE_LIST_NUMBER_TOKEN = re.compile(
+    r'^\s*(?:[（(]\s*([0-9]{1,3}|[A-Za-z])\s*[）)]'
+    r'|([0-9]{1,3})\s*[.．、)]'
+    r'|([①②③④⑤⑥⑦⑧⑨⑩])'
+    r'|([一二三四五六七八九十百]+)\s*[、.])'
+)
+RE_MD_BULLET_PREFIX = re.compile(r'^\s*[-*+]\s+')
 # 兼容旧调用点：整行结构保护（含列表前缀），仅用于不需要处理列表正文的场景
 RE_MD_STRUCTURAL_LINE = re.compile(
     r'^\s*(?:#{1,6}\s|>\s?|[-*+]\s|\d+[.)]\s|\|>|```|---+\s*$|\*\*\*\s*$|___\s*$|<\/?[A-Za-z])'
@@ -214,6 +222,8 @@ MERGE_CONNECTING_PUNCTUATION = '，、：,;:'
 MERGE_JIEBA_PROBE_SIZE = 6
 # 标题型行参与断行合并的最小长度：短标题 + 正文不构成断行，防止把标题与正文误并
 MERGE_HEADING_MIN_LENGTH = 12
+# 列表项被 PDF 断行后的短续行上限：「维护工作；」「使用标准；」这类词组尾部
+MERGE_LIST_TAIL_MAX_LENGTH = 12
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -3277,20 +3287,110 @@ class WordProcessor:
             return False
         return False
 
-    def _is_continuous_pair(self, prev_text, next_text, prev_is_heading=False):
+    @classmethod
+    def _number_token(cls, text):
+        """取列表项的编号类型与序号；无编号返回 None。"""
+        value = RE_MD_BULLET_PREFIX.sub('', text or '', count=1)
+        match = RE_LIST_NUMBER_TOKEN.match(value)
+        if not match:
+            return None
+        for kind, part in enumerate(match.groups()):
+            if part is None:
+                continue
+            if kind == 0 and part.isalpha():
+                return (kind, ord(part.lower()))
+            return (kind, part)
+        return None
+
+    @staticmethod
+    def _number_value(token):
+        if not token:
+            return None
+        _, raw = token
+        if isinstance(raw, int) or (isinstance(raw, str) and raw.isascii() and raw.isdigit()):
+            return int(raw)
+        small = {'①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5,
+                 '⑥': 6, '⑦': 7, '⑧': 8, '⑨': 9, '⑩': 10,
+                 '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                 '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+        return small.get(raw)
+
+    @classmethod
+    def _is_next_number(cls, prev, curr):
+        if not prev or not curr or prev[0] != curr[0]:
+            return False
+        left, right = cls._number_value(prev), cls._number_value(curr)
+        return left is not None and right is not None and right == left + 1
+
+    @classmethod
+    def _numbered_list_gap_indices(cls, texts):
+        """连续编号列表中唯一缺少段尾标点的项：下一行就是它被截断的续文。
+
+        同组相邻编号样式一致、序号连续，且前后两项都以句末标点收尾；当前项
+        却没有段尾标点，而紧跟的非编号行有段尾标点。这正是「其它编号有段尾
+        标点、唯独本项没有、下一行有」的中断特征，无需分词或语言模型。
+        """
+        values = [text.strip() for text in texts]
+        items = [
+            (index, cls._number_token(text), text)
+            for index, text in enumerate(values)
+            if RE_MD_LIST_PREFIX.match(text) and cls._number_token(text)
+        ]
+        result = set()
+        for position in range(1, len(items) - 1):
+            prev_index, prev_number, prev_text = items[position - 1]
+            index, number, text = items[position]
+            next_index, next_number, next_text = items[position + 1]
+            if not (cls._is_next_number(prev_number, number)
+                    and cls._is_next_number(number, next_number)):
+                continue
+            if (not cls._sentence_ends_at(prev_text)
+                    or cls._sentence_ends_at(text)
+                    or not cls._sentence_ends_at(next_text)):
+                continue
+            tail_index = index + 1
+            if tail_index >= len(values) or tail_index == next_index:
+                continue
+            tail = values[tail_index]
+            if not tail or RE_MD_LIST_PREFIX.match(tail) or not cls._sentence_ends_at(tail):
+                continue
+            result.add(index)
+        return result
+
+    def _is_continuous_pair(self, prev_text, next_text, prev_is_heading=False,
+                            prev_is_list_item=False, prev_numbered_gap=False):
         """判断相邻两行是否应连续合并：先排除句末断点，再看续句标点/跨行词。
 
         prev_is_heading 表示前行形似标题。短标题后面跟正文是正常结构，不能合并；
         达到 MERGE_HEADING_MIN_LENGTH 的长标题型行更可能是 PDF 断行的前半段，
         因此只有这类行才允许用跨行词证据与下一行合并。
+
+        prev_is_list_item 用于列表项尾部被 PDF 截断的场景。此时下一行若是很短
+        且以句末标点收尾的词组（「维护工作；」「使用标准；」），即使 jieba 没
+        发现跨行词也判定为续文；短标题式的列表项（如「1) 拆卸准备」）不会命中，
+        因为续行被限定为短词组且前行须带冒号或足够长。
+
+        prev_numbered_gap 表示前行是连续编号列表中唯一没有段尾标点的一项，
+        这是最直接的截断证据，优先于标题长度等弱判据。
         """
         if self._sentence_ends_at(prev_text):
             return False
+        if prev_numbered_gap:
+            return True
         last_char = prev_text.strip().rstrip(MERGE_SENTENCE_END_CLOSERS).rstrip()[-1:]
         if last_char and last_char in MERGE_CONNECTING_PUNCTUATION:
             return True
         if prev_is_heading and len(prev_text.strip()) < MERGE_HEADING_MIN_LENGTH:
             return False
+        tail = next_text.strip()
+        if (prev_is_list_item
+                and tail and len(tail) <= MERGE_LIST_TAIL_MAX_LENGTH
+                and self._sentence_ends_at(tail)
+                and not RE_NOTE_LINE.match(tail)
+                and not self._is_heading_like_text(tail)
+                and ('：' in prev_text or ':' in prev_text
+                     or len(prev_text.strip()) >= MERGE_HEADING_MIN_LENGTH * 2)):
+            return True
         return self._jieba_word_crosses_boundary(prev_text, next_text)
 
     def _merge_continuous_lines(self, doc):
@@ -3299,9 +3399,11 @@ class WordProcessor:
         逐对判断相邻行：前行以句号类标点收尾即为自然段边界；否则若前行以
         逗号类标点收尾、或 jieba 发现拼接处切断了词，则两行连续，合并。
         """
+        raw_texts = [para.text.strip() for para in doc.paragraphs]
+        numbered_gaps = self._numbered_list_gap_indices(raw_texts)
         entries = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
+        for index, para in enumerate(doc.paragraphs):
+            text = raw_texts[index]
             # 含图像的段落本身不参与文本合并，但也不再作为隔断：PDF 粘贴常把
             # 图像插在一句话中间，后续文字仍需与前半句合并；图像段落原样保留。
             if self._has_drawing_or_pict(para) or self._has_embedded_object(para):
@@ -3320,7 +3422,7 @@ class WordProcessor:
             # 标题型行不直接排除：长行可能是 PDF 断行的前半段，先把断行还原，
             # 之后标题识别才不会把续行误判为“标题的专属下文”。短标题仍被挡住。
             heading_like = self._is_heading_like_text(text)
-            if heading_like and len(text) < MERGE_HEADING_MIN_LENGTH:
+            if heading_like and len(text) < MERGE_HEADING_MIN_LENGTH and index not in numbered_gaps:
                 entries.append(None)
                 continue
             entries.append((para, text, heading_like, False))
@@ -3347,6 +3449,8 @@ class WordProcessor:
                 if not self._is_continuous_pair(
                     entries[end][1], candidate[1],
                     prev_is_heading=entries[end][2],
+                    prev_is_list_item=bool(RE_MD_LIST_PREFIX.match(entries[end][1])),
+                    prev_numbered_gap=end in numbered_gaps,
                 ):
                     break
                 end = scan
@@ -4400,6 +4504,7 @@ class WordProcessor:
             (*self._md_list_parts(line, source_ext), self._text_line_is_mergeable(line, source_ext))
             for line in lines
         ]
+        numbered_gaps = self._numbered_list_gap_indices(lines)
         result = []
         index, total = 0, len(lines)
         merged_lines = 0
@@ -4414,7 +4519,11 @@ class WordProcessor:
                 next_prefix, next_body, next_mergeable = entries[end + 1]
                 if not next_mergeable or next_prefix:
                     break  # 下一个列表项是独立条目，不与前一项合并
-                if not self._is_continuous_pair(entries[end][1], next_body):
+                if not self._is_continuous_pair(
+                    entries[end][1], next_body,
+                    prev_is_list_item=bool(entries[end][0]),
+                    prev_numbered_gap=end in numbered_gaps,
+                ):
                     break
                 end += 1
 

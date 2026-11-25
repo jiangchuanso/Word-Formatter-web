@@ -1900,6 +1900,71 @@ class TextCleanupTests(unittest.TestCase):
         self.assertIn('正文说明，图片如下。', content)
         self.assertIn('![Image](M8_artifacts/image_001.png)', content)
 
+    def test_md_list_item_short_phrase_tail_is_merged(self):
+        source = (
+            '- (2) 勤务（SVC：SERVICING）：为了维持固有可靠性而对部件和（或）系统进行的基本\n'
+            '维护工作；\n'
+            '- (7) 恢复（RST：RESTORATION）：通过清洁、更换或者大修使部件和（或）系统恢复到\n'
+            '使用标准；\n'
+            '- 2) 航空器出港起动发动机的联络\n'
+            '在维修人员发出信号前，机组不应松刹车。\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            merge_continuous_lines=True,
+        ))
+        self.assertIn('系统进行的基本维护工作；', content)
+        self.assertIn('系统恢复到使用标准；', content)
+        self.assertIn(
+            '- 2) 航空器出港起动发动机的联络\n在维修人员发出信号前，机组不应松刹车。',
+            content,
+        )
+
+    def test_docx_list_item_short_phrase_tail_is_merged(self):
+        lines = [
+            '(2) 勤务（SVC：SERVICING）：为了维持固有可靠性而对部件和（或）系统进行的基本',
+            '维护工作；',
+            '(7) 恢复（RST：RESTORATION）：通过清洁、更换或者大修使部件和（或）系统恢复到',
+            '使用标准；',
+        ]
+        out = self._run_docx(lines, self._cfg(merge_continuous_lines=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '(2) 勤务（SVC：SERVICING）：为了维持固有可靠性而对部件和（或）系统进行的基本维护工作；',
+            '(7) 恢复（RST：RESTORATION）：通过清洁、更换或者大修使部件和（或）系统恢复到使用标准；',
+        ])
+
+    def test_md_unique_numbered_gap_is_merged(self):
+        # 连续编号中只有 (2) 没有段尾标点，下一行带标点：即使没有冒号、
+        # 也不是长行，仍应识别为断行续文。
+        source = (
+            '- (1) 第一步操作；\n'
+            '- (2) 第二步操作\n'
+            '继续后续动作；\n'
+            '- (3) 第三步操作；\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            merge_continuous_lines=True,
+        ))
+        self.assertIn('- (2) 第二步操作继续后续动作；', content)
+        self.assertIn('- (3) 第三步操作；', content)
+
+    def test_docx_unique_numbered_gap_is_merged(self):
+        lines = [
+            '(1) 第一步操作；',
+            '(2) 第二步操作',
+            '继续后续动作；',
+            '(3) 第三步操作；',
+        ]
+        out = self._run_docx(lines, self._cfg(merge_continuous_lines=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '(1) 第一步操作；',
+            '(2) 第二步操作继续后续动作；',
+            '(3) 第三步操作；',
+        ])
+
     def test_docx_space_cleanup_crosses_runs(self):
         def build(doc):
             para = doc.add_paragraph()
