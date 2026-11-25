@@ -8,6 +8,7 @@ main release.
 
 import copy
 from copy import deepcopy
+import gc
 import itertools
 import logging
 import math
@@ -429,15 +430,28 @@ class WPSAppManager:
         return self.com_app
 
     def quit(self):
-        if self.com_app:
-            self._log("所有任务完成，正在关闭WPS/Word应用...")
+        app, self.com_app = self.com_app, None
+        if app is None:
+            return
+        self._log("所有任务完成，正在关闭WPS/Word应用...")
+        try:
+            # 残留文档会让 Quit() 弹窗或让进程无法退出，先全部静默关闭
             try:
-                self.com_app.Quit()
-            except Exception as e:
-                self._log(f"  > 警告：关闭应用时发生异常: {e}")
-            finally:
-                self.com_app = None
-                self._log("  > 应用已关闭。")
+                app.DisplayAlerts = 0
+            except Exception:
+                pass
+            try:
+                while app.Documents.Count:
+                    app.Documents(1).Close(SaveChanges=0)
+            except Exception:
+                pass
+            app.Quit()
+        except Exception as e:
+            self._log(f"  > 警告：关闭应用时发生异常: {e}")
+        finally:
+            del app
+            gc.collect()
+            self._log("  > 应用已关闭。")
 
 RE_ATTACHMENT_LINE = re.compile(
     r'^附件(?:[ \t\u3000]*(?P<number>\d+|[一二三四五六七八九十百千万零〇两]+))?'
@@ -557,6 +571,16 @@ class WordProcessor:
             remove_blank_lines=remove_blank_lines
         )
         self.remove_blank_lines = self.blank_line_mode == BLANK_LINE_MODE_DELETE_SINGLE
+
+    def __del__(self):
+        # 兜底：自建的 COM 管理器（测试、直接调用等）若未显式 quit，退出时释放
+        # Word/WPS 进程，避免残留进程持续写诊断日志占满磁盘。共享 com_manager
+        # 的场景（CLI/GUI/Web）由外层 WPSAppManager 统一关闭。
+        try:
+            if getattr(self, '_owns_com_manager', False):
+                self.com_manager.quit()
+        except Exception:
+            pass
 
     def _log(self, message):
         if self.log_callback: self.log_callback(message)
@@ -4302,8 +4326,12 @@ class WordProcessor:
         """保持 txt/md 后缀输出：应用全部非格式化清洗，跳过 Word 专属排版。"""
         text = self._read_text_file(input_path)
         applied = []
-        # 先清掉 docling 叠在续行前的页面序号，否则这些续行会被当成独立列表项，
-        # 断行合并阶段就无法把它们接回上一行。
+        # 顺序：空格清理 → 冗余序号清理 → 断行合并 → 符号标准化。
+        # 空格先清掉可让后续判据基于干净文本；冗余序号必须在断行合并之前，
+        # 否则 docling 叠在续行前的页面序号会被当作独立列表项而拒绝合并。
+        if self.config.get('remove_cjk_spaces', False):
+            text = self._apply_text_cleanup(text, source_ext, self._remove_cjk_spaces_in_text)
+            applied.append("中英文/数字间多余空格清理")
         if self.config.get('remove_duplicate_numbering', False):
             text = self._remove_duplicate_numbering_in_text(text, source_ext)
             applied.append("冗余序号清理")
@@ -4313,9 +4341,6 @@ class WordProcessor:
         if self.config.get('normalize_punctuation', False):
             text = self._normalize_text_symbols(text, source_ext)
             applied.append("符号标准化")
-        if self.config.get('remove_cjk_spaces', False):
-            text = self._apply_text_cleanup(text, source_ext, self._remove_cjk_spaces_in_text)
-            applied.append("中英文/数字间多余空格清理")
         if not applied:
             self._log("文本输出：未开启任何清洗选项，内容保持原样。")
 
@@ -4344,9 +4369,20 @@ class WordProcessor:
         apply_color = not is_from_txt
         self._apply_color = apply_color
 
-        # 清洗顺序：先修复结构（断行合并 → 表格合并），再标准化文字
-        # （符号 → PDF 冗余序号 → 中英文/数字间多余空格），最后才做标题证据
-        # 预扫描与版式排版。这样断行、重复序号和空格都不会被误当作标题的下文。
+        # 清洗顺序：空格清理 → 冗余序号清理 → 断行合并 → 表格合并 → 符号标准化，
+        # 全部先于标题证据预扫描与版式排版。
+        # 空格先清掉可让后续判据基于干净文本；冗余序号必须在断行合并之前，
+        # 否则 docling 叠在续行前的页面序号会被当作独立列表项而拒绝合并。
+        if self.config.get('remove_cjk_spaces', False):
+            self._log("正在去除中文与中文/英文/数字之间的多余空格...")
+            space_changes = self._remove_cjk_spaces_in_document(doc)
+            self._log(f"多余空格清理完成，共处理 {space_changes} 个段落。")
+
+        if self.config.get('remove_duplicate_numbering', False):
+            self._log("正在按前后连续性清除 PDF/docling 叠加的冗余序号...")
+            dup_changes = self._remove_duplicate_numbering_in_document(doc)
+            self._log(f"冗余序号清理完成，共处理 {dup_changes} 个段落。")
+
         if self.config.get('merge_continuous_lines', False):
             self._log("正在合并前后行词语连续的断行（PDF 粘贴导致的换行）...")
             self._merge_continuous_lines(doc)
@@ -4358,16 +4394,6 @@ class WordProcessor:
         if self.config.get('normalize_punctuation', False):
             symbol_changes = self._normalize_document_symbols(doc)
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
-
-        if self.config.get('remove_duplicate_numbering', False):
-            self._log("正在按前后连续性清除 PDF/docling 叠加的冗余序号...")
-            dup_changes = self._remove_duplicate_numbering_in_document(doc)
-            self._log(f"冗余序号清理完成，共处理 {dup_changes} 个段落。")
-
-        if self.config.get('remove_cjk_spaces', False):
-            self._log("正在去除中文与中文/英文/数字之间的多余空格...")
-            space_changes = self._remove_cjk_spaces_in_document(doc)
-            self._log(f"多余空格清理完成，共处理 {space_changes} 个段落。")
 
         # 以上清洗全部完成后才做标题证据预扫描与定级，避免重复序号/空格误判层级
         self._prepare_chapter_section_offset(doc)

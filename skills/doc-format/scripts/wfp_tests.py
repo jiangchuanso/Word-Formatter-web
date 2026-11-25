@@ -16,6 +16,7 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
+import wfp_deps
 from wfp_config import DEFAULT_CONFIG, PRESET_GROUPS, apply_preset
 from wfp_core import (
     BLANK_LINE_MODE_DELETE_SINGLE,
@@ -1964,6 +1965,24 @@ class TextCleanupTests(unittest.TestCase):
         texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
         self.assertEqual(texts[1], '2. (a) 第一项；')
 
+    def test_space_cleanup_first_does_not_break_number_cleanup(self):
+        # 清洗顺序：空格 → 冗余序号 → 断行合并 → 符号标准化
+        source = (
+            "- (1) 执行以下步骤，安装轮毂罩：\n"
+            "2. (a) 转动 8 个快卸紧固件[4]四分之一圈；\n"
+            "3. (b) 拆下 3 个螺栓[6]和垫圈[7]；\n"
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_cjk_spaces=True,
+            remove_duplicate_numbering=True,
+            merge_continuous_lines=True,
+            normalize_punctuation=True,
+        ))
+        self.assertIn('(a) 转动8个快卸紧固件[4]四分之一圈；', content)
+        self.assertIn('(b) 拆下3个螺栓[6]和垫圈[7]；', content)
+        self.assertNotIn('2. (a)', content)
+
     def test_md_docling_sequence_from_manual(self):
         source = (
             '## 2) 外侧主轮拆卸：\n'
@@ -2022,6 +2041,42 @@ class TextCleanupTests(unittest.TestCase):
         ))
         self.assertIn('中 文 不 改', content)
         self.assertIn('中文要改', content)
+
+
+class DependencyCheckTests(unittest.TestCase):
+    """启动依赖自检：requirements.txt 中每一项都要被覆盖，不能漏掉 jieba。"""
+
+    def test_web_requirements_include_jieba(self):
+        path = Path(__file__).resolve().parent / "web" / "requirements.txt"
+        names = [wfp_deps.requirement_name(line) for line in wfp_deps.iter_requirement_lines(path)]
+        self.assertIn("jieba", names, "断行合并依赖 jieba，必须纳入启动校验")
+        self.assertIn("python-docx", names)
+        self.assertIn("fastapi", names)
+
+    def test_missing_requirement_is_detected(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deps_") as tmpdir:
+            path = Path(tmpdir) / "requirements.txt"
+            path.write_text(
+                "jieba>=0.42.1\n"
+                "no-such-package-xyz>=1\n"
+                "# 注释与选项应被忽略\n"
+                "-r other.txt\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(wfp_deps.missing_requirements(path), ["no-such-package-xyz"])
+
+    def test_inapplicable_environment_marker_is_skipped(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_deps_") as tmpdir:
+            path = Path(tmpdir) / "requirements.txt"
+            path.write_text(
+                'pywin32>=306; platform_system == "Plan9"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(wfp_deps.missing_requirements(path), [])
+
+    def test_check_all_passes_when_dependencies_installed(self):
+        path = Path(__file__).resolve().parent / "web" / "requirements.txt"
+        self.assertEqual(wfp_deps.check_requirements([path], log=lambda _msg: None), [])
 
 
 class LevelStyleUnificationTests(unittest.TestCase):

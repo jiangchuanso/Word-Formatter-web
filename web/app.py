@@ -34,6 +34,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# ----- 启动前按 requirements 全量校验依赖，缺失直接退出，避免功能静默降级 -----
+try:
+    from wfp_deps import check_requirements as _check_requirements
+except ImportError:  # 源码不完整时交由后续 import 报错
+    _check_requirements = None
+
+_WEB_REQUIREMENTS = PROJECT_ROOT / "web" / "requirements.txt"
+if _check_requirements is not None and _WEB_REQUIREMENTS.is_file():
+    _missing_deps = _check_requirements([_WEB_REQUIREMENTS])
+    if _missing_deps:
+        raise SystemExit(
+            "[deps] 缺少依赖：" + "、".join(name for _, name in _missing_deps) + "\n"
+            f"[deps] 请先执行：python -m pip install -r {_WEB_REQUIREMENTS}"
+        )
+
 try:
     import filetype  # noqa: E402
 except ImportError:  # 老环境未装时降级为「仅后缀校验」，不阻断服务启动

@@ -34,14 +34,18 @@ echo "[2/4] 激活虚拟环境 ..."
 echo "  source .venv/bin/activate 激活虚拟环境，后续 python/pip 均指向 .venv"
 # shellcheck disable=SC1091
 . "$VENV/bin/activate"
-echo "[3/4] 检查依赖 ..."
+echo "[3/4] 检查依赖（按 web/requirements.txt 全量校验）..."
 if [ "${WFP_SKIP_DEPS:-0}" = "1" ]; then
     echo "  已设置 WFP_SKIP_DEPS=1，跳过依赖检查。"
-elif python -c "import fastapi, uvicorn, multipart, filetype, docx, lxml" >/dev/null 2>&1; then
+elif python "$ROOT/wfp_deps.py" "$WEB/requirements.txt"; then
     echo "  依赖已就绪，跳过安装。"
 else
     echo "  检测到依赖缺失，正在安装 ..."
     python -m pip install -r "$WEB/requirements.txt"
+    if ! python "$ROOT/wfp_deps.py" "$WEB/requirements.txt"; then
+        echo "  依赖安装后仍不完整，请检查 requirements.txt 与网络。"
+        exit 1
+    fi
 fi
 echo "[4/4] 启动网站 ..."
 echo "--------------------------------------------------------------"
