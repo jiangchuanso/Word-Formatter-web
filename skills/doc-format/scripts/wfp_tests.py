@@ -1883,6 +1883,24 @@ class TextCleanupTests(unittest.TestCase):
         self.assertEqual(clean('图 1-1 内话 耳机'), '图1-1内话耳机')
         self.assertEqual(clean('Cor-Ban 27L 油脂'), 'Cor-Ban 27L油脂')
 
+    def test_markdown_heading_space_is_preserved(self):
+        clean = WordProcessor._remove_cjk_spaces_in_text
+        self.assertEqual(clean('## 标题'), '## 标题')
+        self.assertEqual(clean('### 一级 标题'), '### 一级标题')
+        self.assertEqual(clean('# English Title'), '# English Title')
+        self.assertEqual(clean('  ##　标题'), '  ## 标题')
+        self.assertEqual(clean('##标题 仍去空格'), '##标题仍去空格')
+
+    def test_markdown_heading_survives_full_cleanup(self):
+        source = '# 总 则\n\n## 二 级\n\n正文 内容。\n'
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_cjk_spaces=True,
+        ))
+        self.assertIn('# 总则', content)
+        self.assertIn('## 二级', content)
+        self.assertIn('正文内容。', content)
+
     def test_body_function_word_break_is_merged(self):
         source = (
             '这是维修工作的\n'

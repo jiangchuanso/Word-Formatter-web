@@ -90,6 +90,8 @@ RE_MD_FULLWIDTH_IMAGE = re.compile(r'！\[Image\]（([^）\n]*)）')
 RE_MD_BOLD_ASTERISK = re.compile(r'\*\*(.*?)\*\*')
 RE_MD_BOLD_UNDERSCORE = re.compile(r'__(.*?)__')
 RE_MD_HEADER = re.compile(r'^\s*#+\s+(.*)')
+# 标题井号后紧跟的空格是 Markdown 大纲语法，空格清理必须原样保留。
+RE_MD_HEADING_PREFIX = re.compile(r'^\s*#+[ \t]+')
 RE_MD_BLOCKQUOTE = re.compile(r'^\s*>\s?(.*)')
 RE_MD_HORIZONTAL_RULE = re.compile(r'^\s*[-*_]{3,}\s*$')
 RE_MD_UNORDERED_LIST_BLOCK = re.compile(r'^\s*[*+-]\s+')
@@ -1021,17 +1023,27 @@ class WordProcessor:
         return end
 
     @classmethod
+    def _leading_protected_prefix_length(cls, text):
+        """行首标题井号后的空格与列表前缀中的空格都必须原样保留。"""
+        value = text or ''
+        heading = RE_MD_HEADING_PREFIX.match(value)
+        if heading:
+            return heading.end()
+        return cls._leading_list_prefix_length(value)
+
+    @classmethod
     def _remove_cjk_spaces_in_text(cls, text):
         """全角空格先统一成半角，再去掉中文语境下汉字/字母/数字/标点之间的空格。
 
         纯英文行（无汉字）只把全角空格换成半角，不动原有半角空格，避免误伤
-        "Cor-Ban 27L"、"version 1.2" 这类英文数字组合。行首列表前缀的空格保留，
-        否则「2. (a) 内容」会被压成「2.(a)内容」而丢失列表结构。
+        "Cor-Ban 27L"、"version 1.2" 这类英文数字组合。行首列表前缀与标题井号
+        后的空格保留，否则「2. (a) 内容」会丢列表结构、「## 标题」会丢 Markdown
+        大纲。
         """
         value = (text or '').replace('\u3000', ' ')
         if not RE_HAS_CHINESE.search(value):
             return value
-        keep = cls._leading_list_prefix_length(value)
+        keep = cls._leading_protected_prefix_length(value)
         prefix, body = value[:keep], value[keep:]
         return prefix + RE_CJK_SPACE_BEFORE.sub('', RE_CJK_SPACE_AFTER.sub('', body))
 
@@ -1039,7 +1051,7 @@ class WordProcessor:
     def _cjk_space_edits(cls, text):
         """生成 Word 段落的文字改写区间：全角空格→半角、多余空格→空。"""
         normalized = (text or '').replace('\u3000', ' ')
-        keep = cls._leading_list_prefix_length(normalized)
+        keep = cls._leading_protected_prefix_length(normalized)
         edits = {}
         if RE_HAS_CHINESE.search(normalized):
             for pattern in (RE_CJK_SPACE_AFTER, RE_CJK_SPACE_BEFORE):
