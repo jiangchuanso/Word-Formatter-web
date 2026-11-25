@@ -109,8 +109,10 @@ CONFIG_DESCRIPTIONS = {
     "normalize_heading_levels": ("标题等级合并优化", "true/false，同格式标题归并等级并补齐跳级，需开启 set_outline"),
     "detect_chapter_section": ("章/节层级识别", "true/false，第X章=1级、第X节=2级，其后编号标题整体顺延"),
     "merge_continuous_lines": ("前后行词语连续合并", "true/false，把 PDF 粘贴造成的断行按标点与词语连续性还原为整段"),
-    "keep_source_extension": ("保持源文件后缀", "true/false，txt/md 直接输出同名同后缀文本，仅做前后行词语连续合并，其余选项跳过"),
+    "keep_source_extension": ("保持源文件后缀", "true/false，txt/md 直接输出同名同后缀文本，应用全部非格式化清洗，Word 专属排版跳过"),
     "merge_repeated_table_headers": ("相同表头连续表格合并", "true/false，合并相邻且表头相同的表格并去除重复表头"),
+    "remove_duplicate_numbering": ("PDF 冗余序号清理", "true/false，按上下文连续性清除 PDF/docling 叠加的序号（「3. 3．标题」「2. (a)」）"),
+    "remove_cjk_spaces": ("多余空格清理", "true/false，去除中文与中文/英文/数字之间的空格，保留英文之间与数字之间的空格"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
     "clear_unused_styles": ("清除未使用自定义样式", "true/false，删除文档中未被引用的自定义（非内置）样式，默认开启"),
     "remove_headers_footers": ("删除页眉页脚", "true/false，删除各节的页眉页脚内容（排版清洗默认开启）"),
@@ -272,6 +274,14 @@ def apply_convenience_overrides(config, args):
         config["merge_repeated_table_headers"] = True
     if getattr(args, "disable_merge_repeated_table_headers", False):
         config["merge_repeated_table_headers"] = False
+    if getattr(args, "remove_duplicate_numbering", False):
+        config["remove_duplicate_numbering"] = True
+    if getattr(args, "disable_remove_duplicate_numbering", False):
+        config["remove_duplicate_numbering"] = False
+    if getattr(args, "remove_cjk_spaces", False):
+        config["remove_cjk_spaces"] = True
+    if getattr(args, "disable_remove_cjk_spaces", False):
+        config["remove_cjk_spaces"] = False
     if getattr(args, "use_builtin_styles", False):
         config["use_builtin_styles"] = True
     if getattr(args, "disable_builtin_styles", False):
@@ -489,8 +499,10 @@ def show_config(args):
             "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
             "detect_chapter_section=true 第X章/第X节识别为 1/2 级标题，编号标题整体顺延",
             "merge_continuous_lines=true 按标点与前后行词语连续性合并断行，还原 PDF 粘贴导致的段落断裂",
-            "keep_source_extension=true txt/md 输出保持源文件后缀，仅执行前后行词语连续合并，其余选项跳过",
+            "keep_source_extension=true txt/md 输出保持源文件后缀，应用全部非格式化清洗，Word 专属排版跳过",
             "merge_repeated_table_headers=true 合并相邻且表头相同的表格，去除重复表头行",
+            "remove_duplicate_numbering=true 按前后连续性清除 PDF/docling 叠加的冗余序号：「3. 3．标题」→「3. 标题」、「2. (a)」→「(a)」",
+            "remove_cjk_spaces=true 去除中文与中文/英文/数字之间的空格，保留英文之间与数字之间的空格",
             "clear_unused_styles=true 清除文档中未被引用的自定义（非内置）样式（默认开启）",
             "remove_headers_footers=true 删除各节的页眉页脚内容",
         ],
@@ -557,6 +569,10 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-keep-source-extension", action="store_true", help="关闭保持源文件后缀，统一输出 docx")
     parser.add_argument("--merge-repeated-table-headers", action="store_true", help="合并相邻且表头相同的表格，去除重复表头（排版清洗预设默认开启）")
     parser.add_argument("--disable-merge-repeated-table-headers", action="store_true", help="关闭相同表头连续表格合并")
+    parser.add_argument("--remove-duplicate-numbering", action="store_true", help="按前后连续性清除 PDF/docling 叠加的冗余序号：「3. 3．标题」→「3. 标题」、「2. (a)」→「(a)」（排版清洗预设默认开启）")
+    parser.add_argument("--disable-remove-duplicate-numbering", action="store_true", help="关闭 PDF 冗余序号清理")
+    parser.add_argument("--remove-cjk-spaces", action="store_true", help="去除中文与中文/英文/数字之间的多余空格（排版清洗预设默认开启）")
+    parser.add_argument("--disable-remove-cjk-spaces", action="store_true", help="关闭中英文/数字间多余空格清理")
     parser.add_argument("--use-builtin-styles", action="store_true", help="用内置标准样式（正文/标题 1~4）统一同级文字（默认开启）")
     parser.add_argument("--disable-builtin-styles", action="store_true", help="关闭标准样式统一，改用逐段直接格式")
     parser.add_argument("--detect-article-title", action="store_true", help="识别“第X条”为条标题并在条后分段（默认开启）")

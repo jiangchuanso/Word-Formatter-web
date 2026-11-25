@@ -511,11 +511,13 @@ function buildForm() {
     </div>`, true));
 
   html.push('<div class="cat-title">排版清洗</div>');
-  html.push(section('增强选项（实验功能）', '清洗源文档：修复标点、还原 PDF 断行、处理浮动对象与图片行距、识别章/节层级、合并标题等级、清除样式与页眉页脚。', `
+  html.push(section('增强选项（实验功能）', '清洗源文档：修复标点、还原 PDF 断行与重复序号、去除多余空格、处理浮动对象与图片行距、识别章/节层级、合并标题等级、清除样式与页眉页脚。', `
     <div class="checkgroup">
       ${check('符号标准化（保守修复中英文标点混用）', 'normalize_punctuation')}
       ${check('前后行词语连续合并（按标点与词语连续性还原 PDF 断行）', 'merge_continuous_lines')}
-      ${check('保持源文件后缀（txt/md 仅合并断行，其余选项跳过）', 'keep_source_extension')}
+      ${check('PDF 冗余序号清理（3. 3．标题 → 3. 标题；2. (a) → (a)）', 'remove_duplicate_numbering')}
+      ${check('去除中文与中文/英文/数字之间的多余空格', 'remove_cjk_spaces')}
+      ${check('保持源文件后缀（txt/md 应用全部非格式化清洗）', 'keep_source_extension')}
       ${check('相同表头连续表格合并（去除重复表头）', 'merge_repeated_table_headers')}
       ${check('浮动对象转插入式（图片/嵌入对象/表格改为随文字排布）', 'convert_floating_objects')}
       ${check('图片行改单倍行距（避免固定行距裁切图片）', 'media_single_line_spacing')}

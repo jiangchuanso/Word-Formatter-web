@@ -160,6 +160,8 @@ class WordFormatterGUI:
         self.merge_continuous_lines_var = tk.BooleanVar(value=self.default_params.get('merge_continuous_lines', False))
         self.keep_source_extension_var = tk.BooleanVar(value=self.default_params.get('keep_source_extension', False))
         self.merge_repeated_table_headers_var = tk.BooleanVar(value=self.default_params.get('merge_repeated_table_headers', False))
+        self.remove_duplicate_numbering_var = tk.BooleanVar(value=self.default_params.get('remove_duplicate_numbering', False))
+        self.remove_cjk_spaces_var = tk.BooleanVar(value=self.default_params.get('remove_cjk_spaces', False))
         self.clear_unused_styles_var = tk.BooleanVar(value=self.default_params.get('clear_unused_styles', True))
         self.remove_headers_footers_var = tk.BooleanVar(value=self.default_params.get('remove_headers_footers', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
@@ -804,8 +806,10 @@ class WordFormatterGUI:
             "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。\n"
             "• 识别章/节层级：把“第X章”识别为 1 级、“第X节”识别为 2 级，“一、/（一）”等编号标题整体顺延。\n"
             "• 前后行词语连续合并：PDF 粘贴的断行在句末标点处停止；前行以逗号收尾或 jieba 发现拼接处切断了词时，把两行还原为整段。\n"
-            "• 保持源文件后缀：txt/md 输入按原后缀输出文本文件，只做前后行词语连续合并；符号标准化、空行整理、字体/样式/大纲/表格等选项自动跳过。\n"
-            "• 相同表头连续表格合并：把相邻且首行（或 Word 重复标题行）文字相同的表格并为一个，只保留一份表头。"
+            "• 保持源文件后缀：txt/md 输入按原后缀输出文本文件，应用全部非格式化清洗；字体/样式/大纲/表格等 Word 专属选项自动跳过。\n"
+            "• 相同表头连续表格合并：把相邻且首行（或 Word 重复标题行）文字相同的表格并为一个，只保留一份表头。\n"
+            "• PDF 冗余序号清理：清除「3. 3．标题」式重复序号；对 docling 的「2. (a)」，按前后子标号连续性判断并去掉页面级叠加的前置数字。\n"
+            "• 多余空格清理：去除中文与中文/英文/数字之间的空格，保留英文之间与数字之间的空格。"
         )
         row = create_section_header(advanced_frame, "增强选项（实验功能）", enhance_help, row)
         ttk.Checkbutton(
@@ -834,6 +838,16 @@ class WordFormatterGUI:
         ttk.Checkbutton(
             advanced_frame, text="相同表头连续表格合并（去除重复表头）",
             variable=self.merge_repeated_table_headers_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="PDF 冗余序号清理（3. 3．标题 / 2. (a)）",
+            variable=self.remove_duplicate_numbering_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="去除中文与中文/英文/数字之间的多余空格",
+            variable=self.remove_cjk_spaces_var,
         ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
         row += 1
 
@@ -963,6 +977,8 @@ class WordFormatterGUI:
         self.merge_continuous_lines_var.set(loaded_config.get('merge_continuous_lines', False))
         self.keep_source_extension_var.set(loaded_config.get('keep_source_extension', False))
         self.merge_repeated_table_headers_var.set(loaded_config.get('merge_repeated_table_headers', False))
+        self.remove_duplicate_numbering_var.set(loaded_config.get('remove_duplicate_numbering', False))
+        self.remove_cjk_spaces_var.set(loaded_config.get('remove_cjk_spaces', False))
         self.clear_unused_styles_var.set(loaded_config.get('clear_unused_styles', True))
         self.remove_headers_footers_var.set(loaded_config.get('remove_headers_footers', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
@@ -984,7 +1000,7 @@ class WordFormatterGUI:
             'title_bold', 'h1_bold', 'h2_bold',
             'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels',
             'detect_chapter_section', 'merge_continuous_lines', 'keep_source_extension',
-            'merge_repeated_table_headers'
+            'merge_repeated_table_headers', 'remove_duplicate_numbering', 'remove_cjk_spaces'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -1047,6 +1063,8 @@ class WordFormatterGUI:
         config['merge_continuous_lines'] = self.merge_continuous_lines_var.get()
         config['keep_source_extension'] = self.keep_source_extension_var.get()
         config['merge_repeated_table_headers'] = self.merge_repeated_table_headers_var.get()
+        config['remove_duplicate_numbering'] = self.remove_duplicate_numbering_var.get()
+        config['remove_cjk_spaces'] = self.remove_cjk_spaces_var.get()
         config['clear_unused_styles'] = self.clear_unused_styles_var.get()
         config['remove_headers_footers'] = self.remove_headers_footers_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()

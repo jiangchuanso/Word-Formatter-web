@@ -22,6 +22,8 @@ from wfp_core import (
     BLANK_LINE_MODE_KEEP_SINGLE,
     BLANK_LINE_MODE_PRESERVE,
     LegacyConversionUnavailable,
+    RE_HEADING_H3_PAREN,
+    RE_HEADING_H4,
     SofficeConverter,
     WordProcessor,
 )
@@ -634,11 +636,22 @@ class HeadingLevelPlanTests(unittest.TestCase):
         # 点分多级编号按深度识别（以三级标题为基准逐级延伸）：
         # 1./1.1./1.1.1./1.1.1.1. → L3/L4/L5/L6
         self.assertEqual(WordProcessor._numbered_heading_level('1. 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('1) 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('a) 方法'), 3)
+        self.assertEqual(WordProcessor._numbered_heading_level('1）方法'), 3)
         self.assertEqual(WordProcessor._numbered_heading_level('1.1. 方法'), 4)
         self.assertEqual(WordProcessor._numbered_heading_level('1.1.1. 方法'), 5)
         self.assertEqual(WordProcessor._numbered_heading_level('1.1.1.1. 方法'), 6)
         self.assertEqual(WordProcessor._numbered_heading_level('(1) 步骤'), 4)
+        self.assertEqual(WordProcessor._numbered_heading_level('（1）步骤'), 4)
         self.assertIsNone(WordProcessor._numbered_heading_level('普通正文'))
+
+    def test_single_paren_pattern_is_distinct_from_double_paren(self):
+        self.assertTrue(RE_HEADING_H3_PAREN.match('1) 步骤'))
+        self.assertTrue(RE_HEADING_H3_PAREN.match('a）步骤'))
+        self.assertFalse(RE_HEADING_H3_PAREN.match('(1) 步骤'))
+        self.assertTrue(RE_HEADING_H4.match('(1) 步骤'))
+        self.assertFalse(RE_HEADING_H4.match('1) 步骤'))
 
     def test_numbered_only_paragraph_is_weak_evidence(self):
         """仅凭“一、”这类文本编号识别的段落，证据等级应为 1（弱），不能扩散到同格式正文。"""
@@ -957,6 +970,28 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         out = self._format(['（1）甲项', '甲项正文。'])
         paras = [p for p in out.paragraphs if p.text.strip()]
         self.assertEqual(self._outline_val(paras[0]), 3)   # L4
+
+    def test_single_paren_number_is_level3_not_level4(self):
+        # 单右括号 1) 与 1. 同级（L3）；同一文档里的双括号 (1) 仍是四级，二者不同级
+        out = self._format(['1) 单括号项', '单括号正文。', '(1) 双括号项', '双括号正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 2)   # 1) → L3
+        self.assertEqual(self._outline_val(paras[2]), 3)   # (1) → L4
+
+    def test_single_paren_letter_and_fullwidth_are_level3(self):
+        # a) 与全角 2）同样按单级编号识别
+        out = self._format(['a) 字母项', '字母项正文。', '2）全角项', '全角项正文。'])
+        vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(vals[0], 2)
+        self.assertEqual(vals[2], 2)
+
+    def test_single_paren_reuses_dotted_context(self):
+        # 点分文档下 1) 与 1. 一样按“上一级的下一级”处理：1.1（L2）之后 → L3
+        out = self._format(['1.1. 范围', '1) 子项甲', '子项甲正文。', '2) 子项乙', '子项乙正文。'])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[1]), 2)   # 1) → L3
+        self.assertEqual(self._outline_val(paras[3]), 2)   # 2) → L3
 
     def test_decimal_in_body_not_heading(self):
         # 正文里的 “1.5 倍” 之类小数不应被误判为标题
@@ -1433,6 +1468,8 @@ class PresetGroupTests(unittest.TestCase):
         merged = apply_preset(base, 'clean')
         self.assertTrue(merged['merge_continuous_lines'])
         self.assertTrue(merged['normalize_punctuation'])
+        self.assertTrue(merged['remove_duplicate_numbering'])
+        self.assertTrue(merged['remove_cjk_spaces'])
         self.assertFalse(base['merge_continuous_lines'], '原字典不应被修改')
         with self.assertRaises(KeyError):
             apply_preset(base, 'unknown')
@@ -1712,6 +1749,228 @@ class KeepSourceExtensionTests(unittest.TestCase):
     def test_clean_preset_enables_option(self):
         self.assertTrue(apply_preset(dict(DEFAULT_CONFIG), 'clean')['keep_source_extension'])
         self.assertFalse(DEFAULT_CONFIG['keep_source_extension'])
+
+
+class TextCleanupTests(unittest.TestCase):
+    """排版清洗：多余空格、PDF 双层序号，且必须在标题定级之前完成。"""
+
+    @staticmethod
+    def _cfg(**overrides):
+        config = DEFAULT_CONFIG.copy()
+        config.update(overrides)
+        return config
+
+    @staticmethod
+    def _outline_val(para):
+        ppr = para._p.find(qn('w:pPr'))
+        if ppr is None:
+            return None
+        node = ppr.find(qn('w:outlineLvl'))
+        return None if node is None else int(node.get(qn('w:val')))
+
+    def _run_docx(self, lines, config=None, build=None):
+        with tempfile.TemporaryDirectory(prefix="wfp_cleanup_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            doc = Document()
+            if build:
+                build(doc)
+            else:
+                for line in lines:
+                    doc.add_paragraph(line)
+            doc.save(source)
+            processor = WordProcessor(config or self._cfg())
+            try:
+                processor.format_document(str(source), str(output))
+                return Document(output)
+            finally:
+                processor._cleanup_temp_files()
+
+    def _run_text(self, source_text, filename, config):
+        with tempfile.TemporaryDirectory(prefix="wfp_cleanup_text_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / filename
+            output = root / ("out" + Path(filename).suffix)
+            source.write_text(source_text, encoding="utf-8")
+            processor = WordProcessor(config)
+            try:
+                processor.format_document(str(source), str(output))
+                return output.read_text(encoding="utf-8")
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_cjk_space_text_rules(self):
+        clean = WordProcessor._remove_cjk_spaces_in_text
+        self.assertEqual(clean('中 文'), '中文')
+        self.assertEqual(clean('中 English 文'), '中English文')
+        self.assertEqual(clean('第 3 章'), '第3章')
+        self.assertEqual(clean('3 中'), '3中')
+        self.assertEqual(clean('English text 3 中'), 'English text 3中')
+        self.assertEqual(clean('中\u3000文'), '中文')
+        self.assertEqual(clean('English text 3 4'), 'English text 3 4')
+
+    def test_duplicate_number_text_rules(self):
+        clean = WordProcessor._remove_duplicate_numbering_in_text_line
+        self.assertEqual(
+            clean('3. 3．航空器移动后，应再次执行轮胎检查；'),
+            '3. 航空器移动后，应再次执行轮胎检查；',
+        )
+        self.assertEqual(clean('4. 4. 轮胎扎伤后'), '4. 轮胎扎伤后')
+        self.assertEqual(clean('5. 6．序号不同保持原样'), '5. 6．序号不同保持原样')
+        self.assertEqual(clean('1. 1.1 子项'), '1. 1.1 子项')
+        self.assertEqual(clean('1. 俯身检查胎面'), '1. 俯身检查胎面')
+
+    def test_docx_space_cleanup_crosses_runs(self):
+        def build(doc):
+            para = doc.add_paragraph()
+            para.add_run('高压九级')
+            para.add_run(' ')
+            para.add_run('接替供气。')
+            para = doc.add_paragraph()
+            para.add_run('检查 ')
+            para.add_run('Engine')
+            para.add_run(' 状态。')
+            doc.add_paragraph('正文内容。')
+
+        out = self._run_docx([], self._cfg(remove_cjk_spaces=True), build=build)
+        texts = [p.text for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, ['高压九级接替供气。', '检查Engine状态。', '正文内容。'])
+
+    def test_docx_duplicate_number_sequence(self):
+        lines = [
+            '1. 俯身检查胎面、侧壁；',
+            '2. 检查胎面时，移除轮档；',
+            '3. 3．航空器移动后，应再次执行轮胎检查；',
+            '4. 4．轮胎扎伤后，应使用专用工具测量；',
+            '5. 5．轮胎嵌入外来物时，严禁取出。',
+        ]
+        out = self._run_docx(lines, self._cfg(remove_duplicate_numbering=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '1. 俯身检查胎面、侧壁；',
+            '2. 检查胎面时，移除轮档；',
+            '3. 航空器移动后，应再次执行轮胎检查；',
+            '4. 轮胎扎伤后，应使用专用工具测量；',
+            '5. 轮胎嵌入外来物时，严禁取出。',
+        ])
+
+    def test_docling_page_number_over_alpha_label_is_removed(self):
+        lines = [
+            '(1) 执行以下步骤，拆除轮毂罩：',
+            '2. (a) 转动8个快卸紧固件[4]四分之一圈；',
+            '3. (b) 拆下3个螺栓[6]和垫圈[7]；',
+            '(2) 执行以下步骤，拆下主轮组件：',
+            '5. (a) 拆下固定轮轴螺帽[16]的两个螺帽[8]；',
+            '7. (b) 使用套筒SPL-1865拆除螺帽[16]；',
+        ]
+        out = self._run_docx(lines, self._cfg(remove_duplicate_numbering=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '(1) 执行以下步骤，拆除轮毂罩：',
+            '(a) 转动8个快卸紧固件[4]四分之一圈；',
+            '(b) 拆下3个螺栓[6]和垫圈[7]；',
+            '(2) 执行以下步骤，拆下主轮组件：',
+            '(a) 拆下固定轮轴螺帽[16]的两个螺帽[8]；',
+            '(b) 使用套筒SPL-1865拆除螺帽[16]；',
+        ])
+
+    def test_docling_note_and_continuation_numbers_removed(self):
+        # 同一页面计数器也会叠到警告行与上一子项的续行上
+        lines = [
+            '(1) 执行以下步骤，安装轮毂罩：',
+            '2. (a) 转动防滞传感器止块，使驱动器和止块',
+            '3. 连接；',
+            '4. (b) 将轮毂罩放到机轮组件上；',
+            '6. 警告：不要将手指放入减重孔中。',
+        ]
+        out = self._run_docx(lines, self._cfg(remove_duplicate_numbering=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, [
+            '(1) 执行以下步骤，安装轮毂罩：',
+            '(a) 转动防滞传感器止块，使驱动器和止块',
+            '连接；',
+            '(b) 将轮毂罩放到机轮组件上；',
+            '警告：不要将手指放入减重孔中。',
+        ])
+
+    def test_docling_prefix_removed_when_parent_number_differs(self):
+        # 父项为 (3)，行首 4. 与父项不一致：即便只有一个字母标号也要清理
+        lines = [
+            '(3) 执行以下步骤，安装轮毂罩：',
+            '4. (a) 转动机轮组件内的防滞传感器止块；',
+        ]
+        out = self._run_docx(lines, self._cfg(remove_duplicate_numbering=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts[1], '(a) 转动机轮组件内的防滞传感器止块；')
+
+    def test_matching_parent_number_is_kept(self):
+        # 父项 (2) 与行首 2. 一致，且无相邻字母子标号：不误删真实编号
+        lines = [
+            '(2) 执行以下步骤：',
+            '2. (a) 第一项；',
+        ]
+        out = self._run_docx(lines, self._cfg(remove_duplicate_numbering=True))
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts[1], '2. (a) 第一项；')
+
+    def test_md_docling_sequence_from_manual(self):
+        source = (
+            '## 2) 外侧主轮拆卸：\n'
+            '- (1) 执行以下步骤，拆除轮毂罩：\n'
+            '2. (a) 转动8个快卸紧固件[4]四分之一圈；\n'
+            '3. (b) 拆下3个螺栓[6]和垫圈[7]；\n'
+            '- (2) 执行以下步骤，拆下主轮组件：\n'
+            '5. (a) 拆下固定轮轴螺帽[16]的两个螺帽[8]；\n'
+            '7. (b) 使用套筒SPL-1865拆除螺帽[16]；\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_duplicate_numbering=True,
+        ))
+        self.assertIn('- (1) 执行以下步骤，拆除轮毂罩：', content)
+        self.assertIn('(a) 转动8个快卸紧固件[4]四分之一圈；', content)
+        self.assertIn('(b) 拆下3个螺栓[6]和垫圈[7]；', content)
+        self.assertIn('(a) 拆下固定轮轴螺帽[16]的两个螺帽[8]；', content)
+        self.assertNotIn('2. (a)', content)
+        self.assertNotIn('5. (a)', content)
+
+    def test_cleanup_before_heading_leveling(self):
+        dirty = ['3. 3．航空器移动后，应再次执行轮胎检查；', '这是正文。']
+        clean = ['3. 航空器移动后，应再次执行轮胎检查；', '这是正文。']
+        out_dirty = self._run_docx(dirty, self._cfg(remove_duplicate_numbering=True))
+        out_clean = self._run_docx(clean)
+        dirty_head = next(p for p in out_dirty.paragraphs if p.text.strip().startswith('3. '))
+        clean_head = next(p for p in out_clean.paragraphs if p.text.strip().startswith('3. '))
+        self.assertEqual(self._outline_val(dirty_head), self._outline_val(clean_head))
+
+    def test_disabled_options_leave_docx_text_untouched(self):
+        lines = ['中 文 English 3 组 合。', '3. 3．航空器移动后；']
+        out = self._run_docx(lines, self._cfg())
+        self.assertEqual([p.text for p in out.paragraphs if p.text.strip()], lines)
+
+    def test_txt_applies_all_non_formatting_cleanup(self):
+        source = '3. 3．航空 器移动后\n中 文 English 组 合 3 项\n'
+        content = self._run_text(source, 'input.txt', self._cfg(
+            keep_source_extension=True,
+            remove_duplicate_numbering=True,
+            remove_cjk_spaces=True,
+        ))
+        self.assertIn('3. 航空器移动后', content)
+        self.assertIn('中文English组合3项', content)
+
+    def test_txt_disabled_options_keep_original(self):
+        source = '3. 3．航空 器移动后\n中 文\n'
+        content = self._run_text(source, 'input.txt', self._cfg(keep_source_extension=True))
+        self.assertEqual(content, source)
+
+    def test_md_fenced_code_is_preserved(self):
+        source = '```\n中 文 不 改\n```\n\n中 文 要 改\n'
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_cjk_spaces=True,
+        ))
+        self.assertIn('中 文 不 改', content)
+        self.assertIn('中文要改', content)
 
 
 class LevelStyleUnificationTests(unittest.TestCase):

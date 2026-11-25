@@ -65,7 +65,11 @@ python scripts/wfp_cli.py test
 | `--disable-detect-chapter-section` | 关闭 | 关闭章/节层级识别 |
 | `--merge-continuous-lines` | 关闭 | 按标点与前后行词语连续性合并断行（还原 PDF 粘贴导致的段落断裂） |
 | `--disable-merge-continuous-lines` | 关闭 | 关闭前后行词语连续合并 |
-| `--keep-source-extension` | 关闭 | txt/md 保持源后缀输出纯文本，仅合并断行、其余选项跳过（排版清洗预设默认开启） |
+| `--remove-duplicate-numbering` | 关闭 | 按前后连续性清除 PDF/docling 叠加的冗余序号：「3. 3．标题」→「3. 标题」、「2. (a)」→「(a)」（排版清洗预设默认开启） |
+| `--disable-remove-duplicate-numbering` | 关闭 | 关闭 PDF 冗余序号清理 |
+| `--remove-cjk-spaces` | 关闭 | 去除中文与中文/英文/数字之间的空格，保留英文之间与数字之间的空格（排版清洗预设默认开启） |
+| `--disable-remove-cjk-spaces` | 关闭 | 关闭中英文/数字间多余空格清理 |
+| `--keep-source-extension` | 关闭 | txt/md 保持源后缀输出纯文本，应用全部非格式化清洗，Word 专属排版跳过（排版清洗预设默认开启） |
 | `--disable-keep-source-extension` | 关闭 | 关闭保持源后缀，统一输出 docx |
 | `--merge-repeated-table-headers` | 关闭 | 合并相邻且表头相同的表格，去除重复表头（排版清洗预设默认开启） |
 | `--disable-merge-repeated-table-headers` | 关闭 | 关闭相同表头连续表格合并 |

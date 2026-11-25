@@ -92,6 +92,31 @@ RE_MD_EMPHASIS_ASTERISK = re.compile(r'(?<!\\)\*([^\s*][^*]*?)(?<!\\)\*')
 RE_MD_STRUCTURAL_LINE = re.compile(
     r'^\s*(?:#{1,6}\s|>\s?|[-*+]\s|\d+[.)]\s|\|>|```|---+\s*$|\*\*\*\s*$|___\s*$|<\/?[A-Za-z])'
 )
+RE_MD_FENCE = re.compile(r'^\s*(?:```|~~~)')
+# 排版清洗：PDF 粘贴常在中日文与相邻中文/英文/数字之间插入多余空格
+_CJK_IDEOGRAPH = r'[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]'
+RE_CJK_SPACE_AFTER = re.compile(
+    rf'(?<={_CJK_IDEOGRAPH})[ \u3000]+(?={_CJK_IDEOGRAPH}|[A-Za-z0-9])'
+)
+RE_CJK_SPACE_BEFORE = re.compile(rf'(?<=[A-Za-z0-9])[ \u3000]+(?={_CJK_IDEOGRAPH})')
+# PDF 转换识别错误：外层自动编号转文字后又重复了一份相同序号（如「3. 3．标题」）
+RE_DUPLICATE_NUMBER = re.compile(
+    r'^([0-9]{1,3})([.．])[ \t]*([0-9]{1,3})([.．])(?![0-9.．])[ \t]*(?=\S)'
+)
+# docling 页面模型会把页面级连续序号叠到真实子标号前：「2. (a) 内容」「4. (b) 内容」
+RE_LEADING_NUMBER_WITH_ALPHA = re.compile(
+    r'^([0-9]{1,3})([.．])[ \t]+(?=[（(][A-Za-z][）)])'
+)
+# 不带前置数字的裸子标号（Word 列表符号或 docling 的「- (a)」「- 1)」）
+RE_BARE_PAREN_LABEL = re.compile(
+    r'^\s*(?:[-*+]\s+)?[（(]([A-Za-z0-9]{1,3})[）)](?=[\s\u4e00-\u9fff]|$)'
+)
+RE_BARE_NUM_PAREN_LABEL = re.compile(
+    r'^\s*(?:[-*+]\s+)?[0-9]{1,3}[）)](?=[\s\u4e00-\u9fff]|$)'
+)
+# 同一个页面级计数器的纯数字前缀（无括号子标号）
+RE_PAGE_NUMBER_PREFIX = re.compile(r'^([0-9]{1,3})([.．])[ \t]+(?=\S)')
+RE_NOTE_LINE = re.compile(r'^\s*(?:警告|注意|说明|警示|提示)\s*[：:]')
 
 
 def output_extension_for(config, source_name):
@@ -108,7 +133,10 @@ RE_TITLE_H1 = re.compile(r'^' + CHINESE_NUM_PATTERN + r'\s*、')
 RE_TITLE_H2 = re.compile(r'^[（\(]' + CHINESE_NUM_PATTERN + r'[）\)]')
 RE_HEADING_H1 = re.compile(r'^[一二三四五六七八九十百千万零]+\s*、')
 RE_HEADING_H2 = re.compile(r'^[（\(][一二三四五六七八九十百千万零]+[）\)]')
-RE_HEADING_H3 = re.compile(r'^[0-9A-Za-z]+\s*[\.．](?=\s|[\u4e00-\u9fff]|$)')
+# 单右括号单级编号（1) / a) / 1））与点号单级编号（1. / A.）同级；
+# 双括号（(1) /（1））是更末级标号，保持四级，见 RE_HEADING_H4。
+RE_HEADING_H3_PAREN = re.compile(r'^[0-9A-Za-z]+\s*[\)）](?=\s|[\u4e00-\u9fff]|$)')
+RE_HEADING_H3 = re.compile(r'^[0-9A-Za-z]+\s*[\.．\)）](?=\s|[\u4e00-\u9fff]|$)')
 RE_HEADING_H4 = re.compile(r'^[（\(]\d+[）\)]')
 # 单独的字母序号：(a) / （a） / (A) 等，与 (1) 同属最末级标号
 RE_HEADING_H4_ALPHA = re.compile(r'^[（\(][a-zA-Z][）\)]')
@@ -897,6 +925,230 @@ class WordProcessor:
                             changes += 1
 
         return changes
+
+    # ------------------------------------------------------------------
+    # 排版清洗：多余空格与 PDF 双层序号（均在标题定级之前执行）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _remove_cjk_spaces_in_text(text):
+        """去掉中文与中文/英文/数字之间的空格，保留英文与英文、数字与数字间的空格。"""
+        value = text or ''
+        return RE_CJK_SPACE_BEFORE.sub('', RE_CJK_SPACE_AFTER.sub('', value))
+
+    @classmethod
+    def _remove_duplicate_numbering_in_text_line(cls, line):
+        """「3. 3．标题」→「3. 标题」；序号不一致时保持原样，避免误删真实层级。"""
+        match = RE_DUPLICATE_NUMBER.match(line or '')
+        if not match or int(match.group(1)) != int(match.group(3)):
+            return line
+        return line[:match.end(2)] + ' ' + line[match.end(0):]
+
+    def _paragraph_text_nodes(self, para):
+        """收集段落可见字符及其来源 w:t 节点，非文本对象位置记为 None。"""
+        valid_runs = {run._r for run in self._iter_inline_runs(para)}
+        chars, mapping = [], []
+        for element in para._p.iter():
+            if element.getparent() not in valid_runs:
+                continue
+            value = self._inline_child_text(element)
+            if not value:
+                continue
+            chars.extend(value)
+            mapping.extend(
+                (element, offset) if element.tag == qn('w:t') else None
+                for offset in range(len(value))
+            )
+        return ''.join(chars), mapping
+
+    def _apply_paragraph_text_edits(self, para, edits):
+        """按可见字符区间改写 w:t，跨 run 安全；区间含非文本节点时跳过该区间。"""
+        _, mapping = self._paragraph_text_nodes(para)
+        node_edits = {}
+        for start, end, replacement in edits:
+            source = mapping[start:end]
+            if not source or any(item is None for item in source):
+                continue
+            for index, (node, offset) in enumerate(source):
+                node_edits.setdefault(node, []).append(
+                    (offset, offset + 1, replacement if index == 0 else '')
+                )
+        for node, changes in node_edits.items():
+            value = node.text or ''
+            for start, end, replacement in sorted(changes, reverse=True):
+                value = value[:start] + replacement + value[end:]
+            node.text = value
+            if value and (value[0].isspace() or value[-1].isspace()):
+                node.set(qn('xml:space'), 'preserve')
+        return bool(node_edits)
+
+    def _cleanable_paragraph(self, para):
+        if self._has_field_codes(para) or self._paragraph_has_ooxml(para, 'w:fldSimple'):
+            return False
+        revisions = {qn('w:' + name) for name in ('ins', 'del', 'moveFrom', 'moveTo')}
+        return not any(element.tag in revisions for element in para._p.iter())
+
+    def _iter_document_paragraphs(self, doc):
+        yield from doc.paragraphs
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    yield from cell.paragraphs
+
+    def _remove_cjk_spaces_in_document(self, doc):
+        changes = 0
+        for para in self._iter_document_paragraphs(doc):
+            if not self._cleanable_paragraph(para):
+                continue
+            text, _ = self._paragraph_text_nodes(para)
+            edits = [
+                (match.start(), match.end(), '')
+                for pattern in (RE_CJK_SPACE_AFTER, RE_CJK_SPACE_BEFORE)
+                for match in pattern.finditer(text)
+            ]
+            if edits and self._apply_paragraph_text_edits(para, edits):
+                changes += 1
+        return changes
+
+    @staticmethod
+    def _md_fence_line_indices(lines, source_ext):
+        """Markdown 围栏代码块（含围栏行）的行号，清洗时必须跳过。"""
+        if source_ext != '.md':
+            return set()
+        result, in_fence = set(), False
+        for index, line in enumerate(lines):
+            if RE_MD_FENCE.match(line):
+                result.add(index)
+                in_fence = not in_fence
+            elif in_fence:
+                result.add(index)
+        return result
+
+    @classmethod
+    def _spurious_leading_number_indices(cls, lines, skip=()):
+        """判定哪些「N. (a)」的前置数字是 docling 页面模型叠加的冗余序号。
+
+        不靠两个序号是否相等，而看前后连续性：
+        1. 同一段落里子标号在相邻字母上延续（a→b、b→c…），说明 (a)/(b) 才是真实子项；
+        2. 最近的裸父项标号「(n)」与行首数字不一致，说明该数字来自页面级计数。
+        """
+        skipped = set(skip)
+        candidates = []
+        for index, line in enumerate(lines):
+            if index in skipped:
+                continue
+            prefix = RE_LEADING_NUMBER_WITH_ALPHA.match(line)
+            if not prefix:
+                continue
+            label = RE_BARE_PAREN_LABEL.match(line[prefix.end():])
+            if not label or not label.group(1).isalpha():
+                continue
+            candidates.append((index, int(prefix.group(1)), label.group(1).lower()))
+
+        by_letter = {}
+        for index, _, letter in candidates:
+            by_letter.setdefault(letter, []).append(index)
+
+        result = set()
+        for index, number, letter in candidates:
+            if (chr(ord(letter) + 1) in by_letter
+                    or chr(ord(letter) - 1) in by_letter):
+                result.add(index)
+                continue
+            for previous in range(index - 1, max(-1, index - 12), -1):
+                if previous in skipped:
+                    continue
+                parent = RE_BARE_PAREN_LABEL.match(lines[previous])
+                if parent and parent.group(1).isdigit():
+                    if int(parent.group(1)) != number:
+                        result.add(index)
+                    break
+
+        # 同一页面计数器也会叠到警告/说明和续行上。仅在已确认存在 docling
+        # 叠加证据（上面的字母子标号被清理）时才处理，避免误伤正常编号列表。
+        if not result:
+            return result
+        for index, line in enumerate(lines):
+            if index in skipped or index in result:
+                continue
+            if RE_DUPLICATE_NUMBER.match(line):
+                continue  # 重复序号模式已单独处理
+            prefix = RE_PAGE_NUMBER_PREFIX.match(line)
+            if not prefix:
+                continue
+            body = line[prefix.end():]
+            if RE_NOTE_LINE.match(body):
+                result.add(index)
+                continue
+            for previous in range(index - 1, max(-1, index - 4), -1):
+                if previous in skipped or not lines[previous].strip():
+                    continue
+                if (previous in result
+                        or RE_BARE_PAREN_LABEL.match(lines[previous])
+                        or RE_BARE_NUM_PAREN_LABEL.match(lines[previous])
+                        or RE_LEADING_NUMBER_WITH_ALPHA.match(lines[previous])):
+                    result.add(index)
+                break
+        return result
+
+    def _remove_duplicate_numbering_in_document(self, doc):
+        paragraphs = list(self._iter_document_paragraphs(doc))
+        texts = []
+        for para in paragraphs:
+            text, _ = self._paragraph_text_nodes(para)
+            texts.append(text)
+
+        changes = 0
+        for para, text in zip(paragraphs, texts):
+            if not self._cleanable_paragraph(para):
+                continue
+            match = RE_DUPLICATE_NUMBER.match(text.lstrip())
+            if not match or int(match.group(1)) != int(match.group(3)):
+                continue
+            shift = len(text) - len(text.lstrip())
+            if self._apply_paragraph_text_edits(
+                para, [(shift + match.end(2), shift + match.end(0), ' ')]
+            ):
+                changes += 1
+
+        for index in self._spurious_leading_number_indices(texts):
+            para = paragraphs[index]
+            if not self._cleanable_paragraph(para):
+                continue
+            prefix = (RE_LEADING_NUMBER_WITH_ALPHA.match(texts[index])
+                      or RE_PAGE_NUMBER_PREFIX.match(texts[index]))
+            if prefix and self._apply_paragraph_text_edits(para, [(0, prefix.end(), '')]):
+                changes += 1
+        return changes
+
+    def _remove_duplicate_numbering_in_text(self, text, source_ext):
+        lines = [self._remove_duplicate_numbering_in_text_line(line) for line in text.split('\n')]
+        skipped = self._md_fence_line_indices(lines, source_ext)
+        for index in self._spurious_leading_number_indices(lines, skipped):
+            prefix = (RE_LEADING_NUMBER_WITH_ALPHA.match(lines[index])
+                      or RE_PAGE_NUMBER_PREFIX.match(lines[index]))
+            if prefix:
+                lines[index] = lines[index][prefix.end():]
+        return '\n'.join(lines)
+
+    def _apply_text_cleanup(self, text, source_ext, transform):
+        """逐行应用文本清洗，Markdown 围栏代码块原样保留。"""
+        result, in_fence = [], False
+        for line in text.split('\n'):
+            if source_ext == '.md' and RE_MD_FENCE.match(line):
+                in_fence = not in_fence
+                result.append(line)
+                continue
+            result.append(line if in_fence else transform(line))
+        return '\n'.join(result)
+
+    def _normalize_text_symbols(self, text, source_ext):
+        return self._apply_text_cleanup(
+            text,
+            source_ext,
+            lambda line: line
+            if source_ext == '.md' and RE_MD_STRUCTURAL_LINE.match(line)
+            else self._normalize_symbols_in_text(line),
+        )
 
     # ------------------------------------------------------------------
     # Markdown cleanup
@@ -4019,19 +4271,31 @@ class WordProcessor:
         return '\n'.join(result)
 
     def _format_text_document(self, input_path, output_path, source_ext):
-        """保持 txt/md 后缀输出：只做前后行词语连续合并，其余选项一律跳过。"""
+        """保持 txt/md 后缀输出：应用全部非格式化清洗，跳过 Word 专属排版。"""
         text = self._read_text_file(input_path)
+        applied = []
         if self.config.get('merge_continuous_lines', False):
             text = self._merge_text_lines(text, source_ext)
-        else:
-            self._log("文本输出：未开启前后行词语连续合并，内容保持原样。")
+            applied.append("前后行词语连续合并")
+        if self.config.get('normalize_punctuation', False):
+            text = self._normalize_text_symbols(text, source_ext)
+            applied.append("符号标准化")
+        if self.config.get('remove_duplicate_numbering', False):
+            text = self._remove_duplicate_numbering_in_text(text, source_ext)
+            applied.append("冗余序号清理")
+        if self.config.get('remove_cjk_spaces', False):
+            text = self._apply_text_cleanup(text, source_ext, self._remove_cjk_spaces_in_text)
+            applied.append("中英文/数字间多余空格清理")
+        if not applied:
+            self._log("文本输出：未开启任何清洗选项，内容保持原样。")
 
         with open(output_path, 'w', encoding='utf-8', newline='') as handle:
             handle.write(text)
 
         self._log(
-            f"保持源文件后缀输出（{source_ext}）：仅应用前后行词语连续合并；"
-            "符号标准化、空行整理、字体/样式/大纲/表格/页眉页脚等对文本不适用的选项已跳过。"
+            f"保持源文件后缀输出（{source_ext}）：已应用"
+            + ("、".join(applied) if applied else "无清洗项")
+            + "；字体/样式/大纲/表格/页眉页脚等 Word 专属排版选项已跳过。"
         )
 
     def format_document(self, input_path, output_path):
@@ -4050,8 +4314,9 @@ class WordProcessor:
         apply_color = not is_from_txt
         self._apply_color = apply_color
 
-        # 清洗顺序：先修复结构（断行合并 → 表格合并），再标准化文字，
-        # 最后才做标题证据预扫描与版式排版。这样断行不会被误当作标题的下文。
+        # 清洗顺序：先修复结构（断行合并 → 表格合并），再标准化文字
+        # （符号 → PDF 冗余序号 → 中英文/数字间多余空格），最后才做标题证据
+        # 预扫描与版式排版。这样断行、重复序号和空格都不会被误当作标题的下文。
         if self.config.get('merge_continuous_lines', False):
             self._log("正在合并前后行词语连续的断行（PDF 粘贴导致的换行）...")
             self._merge_continuous_lines(doc)
@@ -4064,6 +4329,17 @@ class WordProcessor:
             symbol_changes = self._normalize_document_symbols(doc)
             self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
 
+        if self.config.get('remove_duplicate_numbering', False):
+            self._log("正在按前后连续性清除 PDF/docling 叠加的冗余序号...")
+            dup_changes = self._remove_duplicate_numbering_in_document(doc)
+            self._log(f"冗余序号清理完成，共处理 {dup_changes} 个段落。")
+
+        if self.config.get('remove_cjk_spaces', False):
+            self._log("正在去除中文与中文/英文/数字之间的多余空格...")
+            space_changes = self._remove_cjk_spaces_in_document(doc)
+            self._log(f"多余空格清理完成，共处理 {space_changes} 个段落。")
+
+        # 以上清洗全部完成后才做标题证据预扫描与定级，避免重复序号/空格误判层级
         self._prepare_chapter_section_offset(doc)
         self._prepare_dotted_base(doc)
         self._prepare_single_number_restart(doc)
