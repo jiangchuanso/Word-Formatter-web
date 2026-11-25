@@ -933,6 +933,33 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         self.assertEqual(self._outline_val(paras[1]), 2)   # 1. → L3
         self.assertEqual(self._outline_val(paras[3]), 2)   # 2. → L3
 
+    def test_single_number_restart_under_dotted_with_traditional_heading(self):
+        # 有“一、”传统标题时 x.x.x.x 仍是 L4，其下游从 1 起头的连续编号应为 L5，
+        # 不得回落到公文三级标题约定（L3）而比父级还浅。
+        out = self._format([
+            '一、总则', '总则正文。', '1.1.1.1. 说明', '说明正文。',
+            '1. 第一步', '第一步正文。', '2. 第二步', '第二步正文。',
+        ])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[0]), 0)   # 一、L1
+        self.assertEqual(self._outline_val(paras[2]), 3)   # 1.1.1.1 → L4
+        self.assertEqual(self._outline_val(paras[4]), 4)   # 1. → L5
+        self.assertEqual(self._outline_val(paras[6]), 4)   # 2. → L5
+
+    def test_single_number_restart_depth_follows_parent_dotted_level(self):
+        # 以此类推：x.x → L2、x.x.x.x.x → L5，其下游「1.」始终是父级的下一级
+        out = self._format([
+            '一、总则', '总则正文。', '1.1. 范围', '范围正文。',
+            '1. 子项甲', '子项甲正文。', '2. 子项乙', '子项乙正文。',
+            '1.1.1.1.1. 深层', '深层正文。', '1. 深层子项', '深层子项正文。',
+        ])
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(self._outline_val(paras[2]), 1)   # 1.1 → L2
+        self.assertEqual(self._outline_val(paras[4]), 2)   # 1. → L3
+        self.assertEqual(self._outline_val(paras[6]), 2)   # 2. → L3
+        self.assertEqual(self._outline_val(paras[8]), 4)   # 1.1.1.1.1 → L5
+        self.assertEqual(self._outline_val(paras[10]), 5)  # 1. → L6
+
     def test_top_level_sequence_after_dotted_stays_level1(self):
         # 与上文 1. 连续的 2. 仍是主干大纲一级编号，不受“从 1 起头”规则影响
         out = self._format(['1. 总则', '1.1. 范围', '正文甲。', '2. 引用文件', '正文乙。'])

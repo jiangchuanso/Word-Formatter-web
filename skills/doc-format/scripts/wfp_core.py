@@ -3055,9 +3055,10 @@ class WordProcessor:
 
         文档里更深的点分编号（x.x / x.x.x）之后出现的单级标号都不是新的一级标题，
         而是该深层标题的子项：
-        - 「1.」/裸「1内容」：默认按基准级别识别（纯点分文档即一级标题）；只有序号从 1
-          重新起头并依次递增（1、2、3…）时才改判为下一级，避免把「1. 总则 …
-          2. 引用文件」这类顶层编号一起降级；
+        - 「1.」/裸「1内容」：默认按基准级别识别（纯点分文档即一级标题）；只要出现在
+          更深的点分编号之后、且序号从 1 重新起头并依次递增（1、2、3…），就改判为
+          该点分标题的下一级（x.x→L3、x.x.x→L4、x.x.x.x→L5…），与文档基准级别无关；
+          避免把「1. 总则 … 2. 引用文件」这类顶层编号一起降级；
         - 「(1)」/「（1）」：默认固定为四级，与上游层级无关；这里同样按“当前上下文的
           下一级”处理（1.1 之后 → L3、1.1.1 之后 → L4…），避免子项比父项还浅。
 
@@ -3069,8 +3070,7 @@ class WordProcessor:
         self._single_number_owners = []
         if not self._has_dotted_hierarchy:
             return
-        # 「1.」的下一级规则只在点分编号为主干时生效，保持公文三级标题约定不变
-        plain_enabled = self._dotted_base_level == 1
+        # 「1.」的下一级规则只依赖“上游存在更深的点分编号”，与基准级别（公文三级 / 点分主干）无关
         depth = 0              # 当前上下文中最近的点分编号段数
         restart_level = None   # 当前“从 1 重新起头”序列的大纲级别
         previous_value = None  # 该序列的上一序号
@@ -3086,8 +3086,6 @@ class WordProcessor:
                     if level is not None:
                         self._paren_number_levels[id(para._p)] = level
                         self._single_number_owners.append(para._p)
-                    continue
-                if not plain_enabled:
                     continue
                 level = None
                 if restart_level is not None and previous_value is not None and value > previous_value:
