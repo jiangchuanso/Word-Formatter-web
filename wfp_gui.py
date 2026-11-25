@@ -100,6 +100,7 @@ from wfp_core import (
     SUPPORTED_FILE_EXTENSIONS,
     WPSAppManager,
     WordProcessor,
+    output_extension_for,
     _initialize_com_for_thread,
     _uninitialize_com_for_thread,
 )
@@ -156,7 +157,9 @@ class WordFormatterGUI:
         self.detect_chapter_section_var = tk.BooleanVar(value=self.default_params.get('detect_chapter_section', False))
         self.use_builtin_styles_var = tk.BooleanVar(value=self.default_params.get('use_builtin_styles', True))
         self.detect_article_title_var = tk.BooleanVar(value=self.default_params.get('detect_article_title', True))
-        self.merge_broken_lines_var = tk.BooleanVar(value=self.default_params.get('merge_broken_lines', False))
+        self.merge_continuous_lines_var = tk.BooleanVar(value=self.default_params.get('merge_continuous_lines', False))
+        self.keep_source_extension_var = tk.BooleanVar(value=self.default_params.get('keep_source_extension', False))
+        self.merge_repeated_table_headers_var = tk.BooleanVar(value=self.default_params.get('merge_repeated_table_headers', False))
         self.clear_unused_styles_var = tk.BooleanVar(value=self.default_params.get('clear_unused_styles', True))
         self.remove_headers_footers_var = tk.BooleanVar(value=self.default_params.get('remove_headers_footers', False))
         self.convert_auto_numbering_var = tk.BooleanVar(value=self.default_params['convert_auto_numbering'])
@@ -800,7 +803,9 @@ class WordFormatterGUI:
             "• 图片行改单倍行距：含图片或嵌入对象的段落写为单倍行距，避免固定行距裁切对象（含表格内的图片）。\n"
             "• 标题等级合并：相同格式的段落并入同一标题等级（有标题样式的样本优先），并检查补齐跳级；需勾选“自动设置大纲级别”。\n"
             "• 识别章/节层级：把“第X章”识别为 1 级、“第X节”识别为 2 级，“一、/（一）”等编号标题整体顺延。\n"
-            "• 合并等长断行：文档大量在同一位置断行（多为 PDF 粘贴）时，把断行还原为整段。"
+            "• 前后行词语连续合并：PDF 粘贴的断行在句末标点处停止；前行以逗号收尾或 jieba 发现拼接处切断了词时，把两行还原为整段。\n"
+            "• 保持源文件后缀：txt/md 输入按原后缀输出文本文件，只做前后行词语连续合并；符号标准化、空行整理、字体/样式/大纲/表格等选项自动跳过。\n"
+            "• 相同表头连续表格合并：把相邻且首行（或 Word 重复标题行）文字相同的表格并为一个，只保留一份表头。"
         )
         row = create_section_header(advanced_frame, "增强选项（实验功能）", enhance_help, row)
         ttk.Checkbutton(
@@ -818,8 +823,18 @@ class WordFormatterGUI:
             advanced_frame, text="识别章/节层级", variable=self.detect_chapter_section_var,
         ).grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=3, pady=1)
         ttk.Checkbutton(
-            advanced_frame, text="合并等长断行", variable=self.merge_broken_lines_var,
+            advanced_frame, text="前后行词语连续合并", variable=self.merge_continuous_lines_var,
         ).grid(row=row, column=2, columnspan=2, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="保持源文件后缀（txt/md 直接输出文本）",
+            variable=self.keep_source_extension_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
+        row += 1
+        ttk.Checkbutton(
+            advanced_frame, text="相同表头连续表格合并（去除重复表头）",
+            variable=self.merge_repeated_table_headers_var,
+        ).grid(row=row, column=0, columnspan=4, sticky=tk.W, padx=3, pady=1)
         row += 1
 
         self._refresh_spacing_controls()
@@ -945,7 +960,9 @@ class WordFormatterGUI:
         self.detect_chapter_section_var.set(loaded_config.get('detect_chapter_section', False))
         self.use_builtin_styles_var.set(loaded_config.get('use_builtin_styles', True))
         self.detect_article_title_var.set(loaded_config.get('detect_article_title', True))
-        self.merge_broken_lines_var.set(loaded_config.get('merge_broken_lines', False))
+        self.merge_continuous_lines_var.set(loaded_config.get('merge_continuous_lines', False))
+        self.keep_source_extension_var.set(loaded_config.get('keep_source_extension', False))
+        self.merge_repeated_table_headers_var.set(loaded_config.get('merge_repeated_table_headers', False))
         self.clear_unused_styles_var.set(loaded_config.get('clear_unused_styles', True))
         self.remove_headers_footers_var.set(loaded_config.get('remove_headers_footers', False))
         self.convert_auto_numbering_var.set(loaded_config.get('convert_auto_numbering', True))
@@ -966,7 +983,8 @@ class WordFormatterGUI:
             'table_smart_align', 'table_unified_borders',
             'title_bold', 'h1_bold', 'h2_bold',
             'convert_floating_objects', 'media_single_line_spacing', 'normalize_heading_levels',
-            'detect_chapter_section', 'merge_broken_lines'
+            'detect_chapter_section', 'merge_continuous_lines', 'keep_source_extension',
+            'merge_repeated_table_headers'
         ]
         self._enable_dependent_widgets_for_config_load()
         for key, value in loaded_config.items():
@@ -1026,7 +1044,9 @@ class WordFormatterGUI:
         config['detect_chapter_section'] = self.detect_chapter_section_var.get()
         config['use_builtin_styles'] = self.use_builtin_styles_var.get()
         config['detect_article_title'] = self.detect_article_title_var.get()
-        config['merge_broken_lines'] = self.merge_broken_lines_var.get()
+        config['merge_continuous_lines'] = self.merge_continuous_lines_var.get()
+        config['keep_source_extension'] = self.keep_source_extension_var.get()
+        config['merge_repeated_table_headers'] = self.merge_repeated_table_headers_var.get()
         config['clear_unused_styles'] = self.clear_unused_styles_var.get()
         config['remove_headers_footers'] = self.remove_headers_footers_var.get()
         config['convert_auto_numbering'] = self.convert_auto_numbering_var.get()
@@ -1297,15 +1317,15 @@ class WordFormatterGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     @staticmethod
-    def _unique_output_path(output_dir, stem, input_path, used_paths):
+    def _unique_output_path(output_dir, stem, input_path, used_paths, extension='.docx'):
         """输出沿用原文件名；与源文件同名或本次已有同名输出时追加序号，避免覆盖。"""
-        candidate = os.path.join(output_dir, f"{stem}.docx")
+        candidate = os.path.join(output_dir, f"{stem}{extension}")
         counter = 2
         while True:
             key = os.path.normcase(os.path.abspath(candidate))
             if key != os.path.normcase(os.path.abspath(input_path)) and key not in used_paths:
                 break
-            candidate = os.path.join(output_dir, f"{stem}_{counter}.docx")
+            candidate = os.path.join(output_dir, f"{stem}_{counter}{extension}")
             counter += 1
         used_paths.add(key)
         return candidate
@@ -1320,7 +1340,10 @@ class WordFormatterGUI:
             try:
                 self.log_to_debug_window(f"\n--- 开始处理文件 {i}/{total}: {base_name} ---")
                 output_name = os.path.splitext(base_name)[0]
-                output_path = self._unique_output_path(output_dir, output_name, input_path, used_outputs)
+                extension = output_extension_for(processor.config, input_path)
+                output_path = self._unique_output_path(
+                    output_dir, output_name, input_path, used_outputs, extension
+                )
                 processor.format_document(input_path, output_path)
                 self.log_to_debug_window(f"✅ 文件处理成功，已保存至: {output_path}")
                 success_count += 1

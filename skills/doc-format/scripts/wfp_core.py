@@ -38,6 +38,11 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from wfp_process import converter_profile_uri, extended_path, remove_owned_temp_dir, run_isolated
 
+try:
+    import jieba
+except ImportError:  # jieba 缺失时新增强功能降级为仅按标点判断，不影响主流程
+    jieba = None
+
 
 IS_WINDOWS = sys.platform.startswith('win')
 IS_LINUX = sys.platform.startswith('linux')
@@ -83,6 +88,18 @@ RE_MD_UNORDERED_LIST_BLOCK = re.compile(r'^\s*[*+-]\s+')
 RE_MD_UNORDERED_LIST = re.compile(r'^\s*[*+-]\s')
 RE_MD_BULLET_WITH_CONTENT = re.compile(r'^(\s*[*+-]\s)(.*)')
 RE_MD_EMPHASIS_ASTERISK = re.compile(r'(?<!\\)\*([^\s*][^*]*?)(?<!\\)\*')
+# 文本源文件保持后缀输出时，这些行的 Markdown 结构必须原样保留，不参与合并/标点修复
+RE_MD_STRUCTURAL_LINE = re.compile(
+    r'^\s*(?:#{1,6}\s|>\s?|[-*+]\s|\d+[.)]\s|\|>|```|---+\s*$|\*\*\*\s*$|___\s*$|<\/?[A-Za-z])'
+)
+
+
+def output_extension_for(config, source_name):
+    """按“保持文件后缀”配置与源文件后缀决定输出后缀。"""
+    source_ext = os.path.splitext(str(source_name))[1].lower()
+    if config.get('keep_source_extension', False) and source_ext in ('.txt', '.md'):
+        return source_ext
+    return '.docx'
 RE_CURRENCY_PREFIX = re.compile(r'^[¥￥$]')
 RE_CURRENCY_SUFFIX = re.compile(r'(元|万元|亿元)$')
 RE_NUMERIC_TABLE_TEXT = re.compile(r'^[-+]?(?:\d+(?:\.\d+)?|\.\d+)%?$')
@@ -145,10 +162,13 @@ RE_SECTION_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万�
 # 条标题：第X条 / 第XX条 / 第XXX条，级别跟随章/节顺延（无章无节时为 1 级）
 RE_ARTICLE_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]{1,6}\s*条')
 
-# 等长断行合并（PDF 粘贴常见）：满行长度下限、同长度行出现次数下限、长度容差
-BROKEN_LINE_MIN_LENGTH = 15
-BROKEN_LINE_MIN_OCCURRENCES = 5
-BROKEN_LINE_LENGTH_TOLERANCE = 3
+# 前后行词语连续合并（PDF 粘贴常见）：句末/续句标点、jieba 跨行词探测、满行长度下限
+MERGE_SENTENCE_END_PUNCTUATION = '。！？；!?…'
+MERGE_SENTENCE_END_CLOSERS = '”’"）】》』」'
+MERGE_CONNECTING_PUNCTUATION = '，、：,;:'
+MERGE_JIEBA_PROBE_SIZE = 6
+# 标题型行参与断行合并的最小长度：短标题 + 正文不构成断行，防止把标题与正文误并
+MERGE_HEADING_MIN_LENGTH = 12
 
 
 class LegacyConversionUnavailable(RuntimeError):
@@ -1709,6 +1729,87 @@ class WordProcessor:
                 run.font.bold = True
             consumed += run_len
 
+    @staticmethod
+    def _table_header_indices(table):
+        """返回表头行下标：优先 w:tblHeader（Word 重复标题行），否则回退首行。"""
+        indices = []
+        for index, row in enumerate(table.rows):
+            tr_pr = row._tr.trPr
+            node = tr_pr.find(qn('w:tblHeader')) if tr_pr is not None else None
+            if node is not None and node.get(qn('w:val'), 'true') not in ('0', 'false', 'off'):
+                indices.append(index)
+        if not indices and table.rows:
+            indices = [0]
+        return indices
+
+    @staticmethod
+    def _table_header_signature(table, indices):
+        """用表头行的单元格文字生成可比较的签名。"""
+        return tuple(
+            tuple(''.join(p.text for p in cell.paragraphs).strip() for cell in table.rows[i].cells)
+            for i in indices
+        )
+
+    def _merge_repeated_table_headers(self, doc):
+        """合并相邻且表头相同的表格，去掉后续表格的重复表头行。
+
+        Word 开启“重复标题行”后，跨页长表格常被拆成多个连续表格，每个表格
+        都带同一表头。这里把它们的正文行并入第一个表格，删除重复表格与重复
+        表头；表头相同由 w:tblHeader 标记行（无标记时取首行）逐格文字比对。
+        """
+        body = doc.element.body
+        pending = None
+        merged_groups = merged_tables = 0
+
+        for child in list(body.iterchildren()):
+            if isinstance(child, CT_P):
+                para = Paragraph(child, doc)
+                if (
+                    pending is not None
+                    and not para.text.strip()
+                    and not self._has_drawing_or_pict(para)
+                    and not self._has_embedded_object(para)
+                ):
+                    continue
+                pending = None
+                continue
+            if not isinstance(child, CT_Tbl):
+                pending = None
+                continue
+
+            table = Table(child, doc)
+            indices = self._table_header_indices(table)
+            if not indices:
+                pending = None
+                continue
+            signature = self._table_header_signature(table, indices)
+
+            if (
+                pending is not None
+                and signature == pending[2]
+                and len(table.columns) == len(pending[1].columns)
+            ):
+                header_set = set(indices)
+                for row_idx, row in enumerate(table.rows):
+                    if row_idx not in header_set:
+                        pending[1]._tbl.append(deepcopy(row._tr))
+                body.remove(child)
+                merged_tables += 1
+                continue
+
+            if pending is not None and merged_tables:
+                merged_groups += 1
+            pending = (child, table, signature)
+
+        if pending is not None and merged_tables:
+            merged_groups += 1
+        if merged_tables:
+            self._log(
+                f"相邻相同表头表格合并完成：合并 {merged_tables} 个表格、"
+                f"{merged_groups} 组，已去除重复表头。"
+            )
+        return merged_tables
+
     def _format_tables(self, doc, apply_color=True):
         if not self.config.get('enable_table_formatting', False):
             self._log("表格自动调整未启用，跳过表格内容格式化。")
@@ -2729,10 +2830,10 @@ class WordProcessor:
         return self.config['body_font'], self.config['body_size'], False
 
     # ------------------------------------------------------------------
-    # 可选增强五：等长断行合并（PDF 粘贴还原）
+    # 可选增强五：前后行词语连续合并（PDF 粘贴还原）
     # ------------------------------------------------------------------
     def _is_heading_like_text(self, text):
-        """判断段落文字是否形似标题/附件标识，断行合并时必须跳过它们。"""
+        """判断段落文字是否形似标题/附件标识，词语连续合并时必须跳过它们。"""
         value = (text or '').strip()
         if not value:
             return False
@@ -2756,12 +2857,53 @@ class WordProcessor:
         }
         return all(child.tag in plain_tags for child in para._p)
 
-    def _merge_broken_lines(self, doc):
-        """把等长的连续断行合并成整段，还原 PDF 粘贴丢失的段落流畅性。
+    @staticmethod
+    def _sentence_ends_at(text):
+        """取出去掉收尾引号/括号后的末字，判断该行是否以句号类标点收尾。"""
+        value = (text or '').strip().rstrip(MERGE_SENTENCE_END_CLOSERS).rstrip()
+        return bool(value and value[-1] in MERGE_SENTENCE_END_PUNCTUATION)
 
-        判定思路：先统计文档中最常见的“满行”长度，只有当同一长度反复出现
-        （说明文档大量在固定宽度处断行）时，才把连续的满行 + 紧随的短末行
-        合并为一段。
+    @staticmethod
+    def _jieba_word_crosses_boundary(prev_text, next_text):
+        """判断两行拼接处是否恰好切断一个词（如“高压九级接”+“替供气”的“接替”）。
+
+        把前行末若干字与后行首若干字拼成探测串交给 jieba 分词，若存在某个词
+        的区间横跨拼接点，说明 PDF 在词中间断行，应还原为整段。
+        """
+        if jieba is None:
+            return False
+        tail = prev_text[-MERGE_JIEBA_PROBE_SIZE:]
+        head = next_text[:MERGE_JIEBA_PROBE_SIZE]
+        boundary = len(tail)
+        try:
+            for word, start, end in jieba.tokenize(tail + head):
+                if start < boundary < end and len(word.strip()) >= 2:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _is_continuous_pair(self, prev_text, next_text, prev_is_heading=False):
+        """判断相邻两行是否应连续合并：先排除句末断点，再看续句标点/跨行词。
+
+        prev_is_heading 表示前行形似标题。短标题后面跟正文是正常结构，不能合并；
+        达到 MERGE_HEADING_MIN_LENGTH 的长标题型行更可能是 PDF 断行的前半段，
+        因此只有这类行才允许用跨行词证据与下一行合并。
+        """
+        if self._sentence_ends_at(prev_text):
+            return False
+        last_char = prev_text.strip().rstrip(MERGE_SENTENCE_END_CLOSERS).rstrip()[-1:]
+        if last_char and last_char in MERGE_CONNECTING_PUNCTUATION:
+            return True
+        if prev_is_heading and len(prev_text.strip()) < MERGE_HEADING_MIN_LENGTH:
+            return False
+        return self._jieba_word_crosses_boundary(prev_text, next_text)
+
+    def _merge_continuous_lines(self, doc):
+        """把前后行词语连续的相邻段落合并成整段，还原 PDF 粘贴丢失的段落流畅性。
+
+        逐对判断相邻行：前行以句号类标点收尾即为自然段边界；否则若前行以
+        逗号类标点收尾、或 jieba 发现拼接处切断了词，则两行连续，合并。
         """
         entries = []
         for para in doc.paragraphs:
@@ -2770,68 +2912,51 @@ class WordProcessor:
                 not text
                 or self._has_drawing_or_pict(para)
                 or self._has_embedded_object(para)
-                or self._is_heading_like_text(text)
                 or not self._paragraph_is_plain_runs(para)
                 or self._get_paragraph_alignment(para)
                 in (WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)
             ):
                 entries.append(None)
                 continue
-            entries.append((para, len(text)))
-
-        lengths = [entry[1] for entry in entries if entry and entry[1] >= BROKEN_LINE_MIN_LENGTH]
-        if not lengths:
-            self._log("  > 未发现可统计的断行，跳过等长断行合并。")
-            return 0
-
-        mode_length, mode_count = Counter(lengths).most_common(1)[0]
-        if mode_count < BROKEN_LINE_MIN_OCCURRENCES:
-            self._log(
-                f"  > 最常见的行长 {mode_length} 字只出现 {mode_count} 行，"
-                "不满足“大量等长断行”条件，跳过。"
-            )
-            return 0
-
-        def is_full(entry):
-            return (
-                entry is not None
-                and abs(entry[1] - mode_length) <= BROKEN_LINE_LENGTH_TOLERANCE
-            )
+            # 标题型行不直接排除：长行可能是 PDF 断行的前半段，先把断行还原，
+            # 之后标题识别才不会把续行误判为“标题的专属下文”。短标题仍被挡住。
+            heading_like = self._is_heading_like_text(text)
+            if heading_like and len(text) < MERGE_HEADING_MIN_LENGTH:
+                entries.append(None)
+                continue
+            entries.append((para, text, heading_like))
 
         paragraphs = [entry[0] if entry is not None else None for entry in entries]
         merged_paragraphs = merged_lines = 0
         index, total = 0, len(entries)
         while index < total:
-            if not is_full(entries[index]):
+            if entries[index] is None:
                 index += 1
                 continue
 
-            last_full = index
-            while last_full + 1 < total and is_full(entries[last_full + 1]):
-                last_full += 1
-            full_count = last_full - index + 1
-            end = last_full
-            # 自然段的最后一行通常不满行，跟在满行之后一并合并
-            if (
-                full_count >= 2
-                and last_full + 1 < total
-                and entries[last_full + 1] is not None
-                and not is_full(entries[last_full + 1])
+            end = index
+            while (
+                end + 1 < total
+                and entries[end + 1] is not None
+                and self._is_continuous_pair(
+                    entries[end][1], entries[end + 1][1],
+                    prev_is_heading=entries[end][2],
+                )
             ):
-                end = last_full + 1
+                end += 1
 
-            if full_count >= 2:
-                preview = entries[index][0].text.strip()[:30].replace("\n", " ")
+            if end > index:
+                preview = entries[index][1][:30].replace("\n", " ")
                 self._merge_paragraph_range(paragraphs, index, end)
                 merged_paragraphs += 1
                 merged_lines += end - index
                 self._log(
-                    f"  > 合并 {end - index + 1} 行为一段（主行长 {mode_length} 字）: \"{preview}...\""
+                    f"  > 合并 {end - index + 1} 行为一段（前后行词语连续）: \"{preview}...\""
                 )
             index = end + 1
 
         self._log(
-            f"等长断行合并完成：主行长 {mode_length} 字，合并 {merged_paragraphs} 段、"
+            f"前后行词语连续合并完成：合并 {merged_paragraphs} 段、"
             f"消除 {merged_lines} 处断行。"
         )
         return merged_lines
@@ -3822,22 +3947,106 @@ class WordProcessor:
         self._pending_title_blank_lines = []
 
 
+    @staticmethod
+    def _join_text_lines(prev, nxt):
+        """文本输出时拼接两行：ASCII  alphanumeric 交界补空格，与 docx 合并行为一致。"""
+        left = prev.rstrip()
+        right = nxt.lstrip()
+        if (
+            left and right
+            and left[-1].isascii() and left[-1].isalnum()
+            and right[0].isascii() and right[0].isalnum()
+        ):
+            return left + ' ' + right
+        return left + right
+
+    def _text_line_is_mergeable(self, line, source_ext):
+        """文本输出时，空行与 Markdown 结构行作为硬边界，不参与断行合并。"""
+        value = (line or '').strip()
+        if not value:
+            return False
+        if source_ext == '.md' and RE_MD_STRUCTURAL_LINE.match(line):
+            return False
+        return not self._is_heading_like_text(value)
+
+    def _merge_text_lines(self, text, source_ext):
+        """在纯文本上执行与 docx 相同的“前后行词语连续合并”。"""
+        lines = text.split('\n')
+        result = []
+        index, total = 0, len(lines)
+        merged_lines = 0
+        while index < total:
+            if not self._text_line_is_mergeable(lines[index], source_ext):
+                result.append(lines[index])
+                index += 1
+                continue
+
+            end = index
+            while (
+                end + 1 < total
+                and self._text_line_is_mergeable(lines[end + 1], source_ext)
+                and self._is_continuous_pair(lines[end], lines[end + 1])
+            ):
+                end += 1
+
+            if end > index:
+                combined = lines[index]
+                for nxt in lines[index + 1:end + 1]:
+                    combined = self._join_text_lines(combined, nxt)
+                result.append(combined)
+                merged_lines += end - index
+            else:
+                result.append(lines[index])
+            index = end + 1
+
+        self._log(f"文本输出：消除 {merged_lines} 处断行。")
+        return '\n'.join(result)
+
+    def _format_text_document(self, input_path, output_path, source_ext):
+        """保持 txt/md 后缀输出：只做前后行词语连续合并，其余选项一律跳过。"""
+        text = self._read_text_file(input_path)
+        if self.config.get('merge_continuous_lines', False):
+            text = self._merge_text_lines(text, source_ext)
+        else:
+            self._log("文本输出：未开启前后行词语连续合并，内容保持原样。")
+
+        with open(output_path, 'w', encoding='utf-8', newline='') as handle:
+            handle.write(text)
+
+        self._log(
+            f"保持源文件后缀输出（{source_ext}）：仅应用前后行词语连续合并；"
+            "符号标准化、空行整理、字体/样式/大纲/表格/页眉页脚等对文本不适用的选项已跳过。"
+        )
+
     def format_document(self, input_path, output_path):
+        source_ext = os.path.splitext(str(input_path))[1].lower()
+        if self.config.get('keep_source_extension', False) and source_ext in ('.txt', '.md'):
+            if os.path.splitext(str(output_path))[1].lower() != source_ext:
+                output_path = os.path.splitext(str(output_path))[0] + source_ext
+            self._format_text_document(input_path, output_path, source_ext)
+            return
+
         processing_path, is_from_txt = self.convert_to_docx(input_path)
         processing_path = self._preprocess_document(processing_path, is_from_txt)
         
         doc = Document(processing_path)
 
-        if self.config.get('normalize_punctuation', False):
-            symbol_changes = self._normalize_document_symbols(doc)
-            self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
-        
         apply_color = not is_from_txt
         self._apply_color = apply_color
 
-        if self.config.get('merge_broken_lines', False):
-            self._log("正在合并等长断行（PDF 粘贴导致的换行）...")
-            self._merge_broken_lines(doc)
+        # 清洗顺序：先修复结构（断行合并 → 表格合并），再标准化文字，
+        # 最后才做标题证据预扫描与版式排版。这样断行不会被误当作标题的下文。
+        if self.config.get('merge_continuous_lines', False):
+            self._log("正在合并前后行词语连续的断行（PDF 粘贴导致的换行）...")
+            self._merge_continuous_lines(doc)
+
+        if self.config.get('merge_repeated_table_headers', False):
+            self._log("正在合并相邻且表头相同的表格（Word 重复标题行）...")
+            self._merge_repeated_table_headers(doc)
+
+        if self.config.get('normalize_punctuation', False):
+            symbol_changes = self._normalize_document_symbols(doc)
+            self._log(f"符号标准化完成，共修复 {symbol_changes} 个段落/表格单元格。")
 
         self._prepare_chapter_section_offset(doc)
         self._prepare_dotted_base(doc)
@@ -3962,6 +4171,40 @@ class WordProcessor:
             content = prefix_content[_end] - prefix_content[_i + 1]
             if deeper == 0 and content == 0:
                 self._demoted_body[_i] = True
+
+        # 连续相邻的同级序号子标题：若前面各项都因“没有专属下文”降级为正文，
+        # 那么末项之后的正文属于整组序号段落的总体说明，而不是末项的专属下文，
+        # 末项不应单独被标题化。
+        _run_start = 0
+        while _run_start < total:
+            _rank = heading_ranks[_run_start]
+            if (
+                _rank <= 0
+                or not isinstance(all_blocks[_run_start], Paragraph)
+                or not _is_h4_label(all_blocks[_run_start].text)
+            ):
+                _run_start += 1
+                continue
+            _run_end = _run_start + 1
+            while (
+                _run_end < total
+                and heading_ranks[_run_end] == _rank
+                and isinstance(all_blocks[_run_end], Paragraph)
+                and _is_h4_label(all_blocks[_run_end].text)
+            ):
+                _run_end += 1
+            _last = _run_end - 1
+            if _run_end - _run_start >= 2 and not self._demoted_body[_last]:
+                _end = scope_end[_last]
+                _has_deeper = prefix_heading[_end] - prefix_heading[_last + 1]
+                _has_content = prefix_content[_end] - prefix_content[_last + 1]
+                if (
+                    _has_deeper == 0
+                    and _has_content > 0
+                    and all(self._demoted_body[k] for k in range(_run_start, _last))
+                ):
+                    self._demoted_body[_last] = True
+            _run_start = _run_end
 
         if not is_from_txt:
             self._log("正在扫描图表标题...")

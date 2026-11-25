@@ -37,7 +37,9 @@ DEFAULT_CONFIG = {
     'media_single_line_spacing': False,  # 含图片或嵌入对象的段落改为单倍行距
     'normalize_heading_levels': False,  # 合并相同格式标题等级并补齐跳级
     'detect_chapter_section': False,  # 识别“第X章/第X节”为 1/2 级标题，其后编号标题整体顺延
-    'merge_broken_lines': False,  # 合并等长断行（PDF 粘贴导致的换行）
+    'merge_continuous_lines': False,  # 合并前后行词语连续的断行（PDF 粘贴导致的换行）
+    'keep_source_extension': False,  # 输出保持源文件后缀（txt/md 直接输出文本，跳过 Word 专属排版）
+    'merge_repeated_table_headers': False,  # 合并相邻且表头相同的表格，去除重复表头行（Word 重复标题行）
     'enable_table_formatting': False, 'table_header_font': '仿宋_GB2312',
     'table_font': '仿宋_GB2312', 'table_size': 12, 'table_line_spacing': 22,
     'table_line_spacing_unit': 'pt', 'table_line_spacing_multiple': 1.0,
@@ -81,10 +83,12 @@ PRESET_GROUPS = {
     },
     'clean': {
         'label': '排版清洗',
-        'description': '符号标准化、断行合并、浮动对象、图片行距、标题等级合并、章/节层级辅助判断、清除未使用样式、删除页眉页脚、空行处理',
+        'description': '符号标准化、词语连续合并、保持源文件后缀、相同表头连续表格合并、浮动对象、图片行距、标题等级合并、章/节层级辅助判断、清除未使用样式、删除页眉页脚、空行处理',
         'values': {
             'normalize_punctuation': True,
-            'merge_broken_lines': True,
+            'merge_continuous_lines': True,
+            'keep_source_extension': True,
+            'merge_repeated_table_headers': True,
             'convert_floating_objects': True,
             'media_single_line_spacing': True,
             'normalize_heading_levels': True,

@@ -17,9 +17,11 @@ description: 公文格式排版工具。将 doc/docx/wps/txt/md 文档按照公�
 - 行距支持默认磅值模式和 Word 倍数模式；段落缩进支持厘米和字符两种单位。
 - 段落等级确定后，各级格式写进 Word「标准样式」的 `正文` / `标题 1~4` 并套用到同级段落，同级文字共用一套样式；表格、页眉页脚、空行保持原有字体字号。开关 `use_builtin_styles` 默认开启，可用 `--disable-builtin-styles` 关闭。
 - 可选题目/一级标题/二级标题强制加粗、表格内容自动调整、数字和字母单独字体、符号标准化。
-- 可选增强（默认关闭）：浮动式图片/嵌入对象/表格转插入式（`convert_floating_objects`）、含图片/嵌入对象的段落改单倍行距（`media_single_line_spacing`）、相同格式标题等级合并与补齐跳级（`normalize_heading_levels`，需 `set_outline=true`）、章/节层级识别（`detect_chapter_section`）、等长断行合并（`merge_broken_lines`）。
+- 可选增强（默认关闭）：浮动式图片/嵌入对象/表格转插入式（`convert_floating_objects`）、含图片/嵌入对象的段落改单倍行距（`media_single_line_spacing`）、相同格式标题等级合并与补齐跳级（`normalize_heading_levels`，需 `set_outline=true`）、章/节层级识别（`detect_chapter_section`）、前后行词语连续合并（`merge_continuous_lines`，需 `jieba`，缺失时仅按标点判断）、保持源文件后缀（`keep_source_extension`）。
+- 保持源文件后缀：`txt`/`md` 输入直接输出同名同后缀文本，**只执行前后行词语连续合并**；符号标准化、空行整理、字体/样式/大纲/表格/页眉页脚等选项即使选中也跳过，`md` 结构、空行与标点原样保留。默认关闭，`--preset clean` 默认开启。
+- 相同表头连续表格合并（`merge_repeated_table_headers`）：相邻表格表头行文字相同（优先 `w:tblHeader` 标记行）时合并为一个表格并删除重复表头。默认关闭，`--preset clean` 默认开启。
 - 清除未使用自定义样式（`clear_unused_styles`，默认开启）与删除页眉页脚（`remove_headers_footers`，排版清洗预设开启）：分别删除未被引用的自定义样式、各节页眉页脚内容。
-- 快捷配置（`--preset`）：`format` = 公文格式排版（页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别）；`clean` = 排版清洗（符号标准化、断行合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚）。两者可叠加，且在 `--set` 之前生效。
+- 快捷配置（`--preset`）：`format` = 公文格式排版（页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别）；`clean` = 排版清洗（符号标准化、词语连续合并、保持源文件后缀、相同表头连续表格合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚）。两者可叠加，且在 `--set` 之前生效。
 - TXT/MD 支持三种空行模式：不改动任何空行；删除单个空行，多个空行保留至 1 个空行；保留单个空行，多个空行保留至 1 个空行。
 - TXT/MD 中手写数字编号（如 `1.`、`1.2.3`）按源文档保留，不自动递增重排。
 - 支持自动读取当前目录 `wfp_config.json`、指定 JSON 配置文件、内联 JSON、`--set key=value` 和便利开关覆盖配置。

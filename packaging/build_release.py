@@ -170,6 +170,7 @@ runtime = {runtime!r}
 data, binaries, hidden = collect_all('tkinterdnd2')
 binaries += [(item['dll'], '.') for item in runtime.values()]
 data += collect_data_files('docx')
+data += collect_data_files('jieba')
 data += [({str(module_file(py, 'docx.parts'))!r}, 'docx/parts')]
 hidden += ['wfp_numbering', 'wfp_signature'] + collect_submodules('fontTools.ttLib')
 a = Analysis([{str(ROOT / 'wfp.py')!r}], pathex=[{str(ROOT)!r}], binaries=binaries,
@@ -233,6 +234,8 @@ def pyinstaller_base(py: Path, target: str) -> list[str]:
         "tkinterdnd2",
         "--collect-data",
         "docx",
+        "--collect-data",
+        "jieba",
         "--hidden-import",
         "wfp_numbering",
         "--hidden-import",

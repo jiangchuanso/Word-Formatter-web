@@ -63,8 +63,12 @@ python scripts/wfp_cli.py test
 | `--disable-normalize-heading-levels` | 关闭 | 关闭标题等级合并优化 |
 | `--detect-chapter-section` | 关闭 | 第X章/第X节识别为 1/2 级，编号标题整体顺延 |
 | `--disable-detect-chapter-section` | 关闭 | 关闭章/节层级识别 |
-| `--merge-broken-lines` | 关闭 | 合并等长断行（还原 PDF 粘贴导致的段落断裂） |
-| `--disable-merge-broken-lines` | 关闭 | 关闭等长断行合并 |
+| `--merge-continuous-lines` | 关闭 | 按标点与前后行词语连续性合并断行（还原 PDF 粘贴导致的段落断裂） |
+| `--disable-merge-continuous-lines` | 关闭 | 关闭前后行词语连续合并 |
+| `--keep-source-extension` | 关闭 | txt/md 保持源后缀输出纯文本，仅合并断行、其余选项跳过（排版清洗预设默认开启） |
+| `--disable-keep-source-extension` | 关闭 | 关闭保持源后缀，统一输出 docx |
+| `--merge-repeated-table-headers` | 关闭 | 合并相邻且表头相同的表格，去除重复表头（排版清洗预设默认开启） |
+| `--disable-merge-repeated-table-headers` | 关闭 | 关闭相同表头连续表格合并 |
 | `--use-builtin-styles` | 开启 | 用内置标准样式（正文/标题 1~4）统一同级文字 |
 | `--disable-builtin-styles` | 开启 | 关闭标准样式统一，改用逐段直接格式 |
 | `--detect-article-title` | 开启 | 识别「第X条」为条标题，条后正文另起一段 |
@@ -74,7 +78,7 @@ python scripts/wfp_cli.py test
 | `--remove-headers-footers` | 关闭 | 删除各节的页眉页脚内容 |
 | `--disable-remove-headers-footers` | 关闭 | 关闭删除页眉页脚 |
 | `--preset format` | 无 | 快捷配置「公文格式排版」：页边距/A4、字体字号行距、大纲层级、附件与表格、章·节识别 |
-| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、断行合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚 |
+| `--preset clean` | 无 | 快捷配置「排版清洗」：符号标准化、词语连续合并、保持源文件后缀、相同表头连续表格合并、浮动对象、图片行距、章·节层级辅助判断、标题等级合并、清除未使用样式、删除页眉页脚 |
 | `--blank-line-mode` | 删除单个空行，多个空行保留至1个空行 | 覆盖 TXT/MD 空行处理模式 |
 | `--no-recursive` | 关闭 | 目录输入时不递归子目录；默认递归 |
 | `--soffice <路径>` | 自动查找 | 指定 LibreOffice `soffice` 路径，用于 `.doc/.wps` 转 `.docx` |

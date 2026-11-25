@@ -58,6 +58,7 @@ from wfp_core import (  # noqa: E402
     WordProcessor,
     _initialize_com_for_thread,
     _uninitialize_com_for_thread,
+    output_extension_for,
 )
 
 from wfp_version import APP_TITLE, __version__  # noqa: E402
@@ -302,11 +303,11 @@ def _safe_output_stem(original_name: str) -> str:
     return (stem or "document")[:120]
 
 
-def _unique_output_path(out_dir: Path, stem: str) -> Path:
-    candidate = out_dir / f"{stem}.docx"
+def _unique_output_path(out_dir: Path, stem: str, extension: str = ".docx") -> Path:
+    candidate = out_dir / f"{stem}{extension}"
     counter = 2
     while candidate.exists():
-        candidate = out_dir / f"{stem}_{counter}.docx"
+        candidate = out_dir / f"{stem}_{counter}{extension}"
         counter += 1
     return candidate
 
@@ -398,7 +399,8 @@ def _format_document(input_path: str, output_path: str, config: dict, com_mgr, l
 
 def _format_one(job_id: str, original_name: str, in_path: str, out_dir: Path,
                 config: dict, com_mgr) -> dict:
-    out_path = _unique_output_path(out_dir, _safe_output_stem(original_name))
+    extension = output_extension_for(config, original_name)
+    out_path = _unique_output_path(out_dir, _safe_output_stem(original_name), extension)
     log_lines: list[str] = []
 
     def log_cb(msg):
@@ -736,8 +738,9 @@ async def format_text(
             detail=f"文本过长（上限 {MAX_TEXT_CHARS} 字符），请缩短后重试",
         )
     coerced = _coerce_config(_parse_config_form(config))
-    # 直接输入文本：强制 A4（与本地版一致）
+    # 直接输入文本：强制 A4（与本地版一致），无源文件后缀可保持，统一输出 docx
     coerced["force_a4"] = True
+    coerced["keep_source_extension"] = False
 
     job_id = uuid.uuid4().hex
     out_dir = OUTPUT_DIR / job_id
@@ -775,21 +778,27 @@ async def format_text(
 async def download(job_id: str, filename: str):
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(status_code=400, detail="非法任务 ID")
+    extension = os.path.splitext(filename)[1].lower()
     if (
         not filename
         or filename != os.path.basename(filename)
         or ".." in filename
         or RE_SAFE_FILENAME_CHARS.search(filename)
-        or not filename.lower().endswith(".docx")
+        or extension not in (".docx", ".txt", ".md")
     ):
         raise HTTPException(status_code=400, detail="非法文件名")
     file_path = OUTPUT_DIR / job_id / filename
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在或已过期")
+    media_types = {
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".txt": "text/plain; charset=utf-8",
+        ".md": "text/markdown; charset=utf-8",
+    }
     return FileResponse(
         str(file_path),
         filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type=media_types[extension],
     )
 
 

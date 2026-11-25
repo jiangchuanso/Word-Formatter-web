@@ -119,6 +119,118 @@ class TableHelperTests(unittest.TestCase):
         self.assertEqual(pcts, [20.0, 80.0])
 
 
+class RepeatedTableHeaderMergeTests(unittest.TestCase):
+    def _build_doc(self, path, tables, mark_header=False):
+        doc = Document()
+        for header, rows in tables:
+            table = doc.add_table(rows=1 + len(rows), cols=len(header))
+            for col, text in enumerate(header):
+                table.cell(0, col).text = text
+            for row_idx, values in enumerate(rows, start=1):
+                for col, text in enumerate(values):
+                    table.cell(row_idx, col).text = text
+            if mark_header:
+                tr_pr = table.rows[0]._tr.get_or_add_trPr()
+                tr_pr.append(OxmlElement('w:tblHeader'))
+        doc.save(path)
+
+    def _merge(self, source, output, enabled=True):
+        config = DEFAULT_CONFIG.copy()
+        config['merge_repeated_table_headers'] = enabled
+        config['enable_table_formatting'] = False
+        processor = WordProcessor(config)
+        try:
+            processor.format_document(str(source), str(output))
+        finally:
+            processor._cleanup_temp_files()
+        return Document(output)
+
+    def test_adjacent_tables_with_same_header_are_merged(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_tbl_merge_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            self._build_doc(
+                source,
+                [
+                    (("名称", "数值"), [("A", "1")]),
+                    (("名称", "数值"), [("B", "2")]),
+                    (("名称", "数值"), [("C", "3")]),
+                ],
+            )
+
+            doc = self._merge(source, output)
+            self.assertEqual(len(doc.tables), 1)
+            table = doc.tables[0]
+            self.assertEqual(
+                [[cell.text for cell in row.cells] for row in table.rows],
+                [["名称", "数值"], ["A", "1"], ["B", "2"], ["C", "3"]],
+            )
+
+    def test_repeat_header_marker_is_used(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_tbl_merge_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            self._build_doc(
+                source,
+                [
+                    (("说明", "值"), [("前置", "x"), ("名称", "数值"), ("A", "1")]),
+                    (("说明", "值"), [("前置", "y"), ("名称", "数值"), ("B", "2")]),
+                ],
+            )
+            doc = Document(source)
+            for table in doc.tables:
+                tr_pr = table.rows[2]._tr.get_or_add_trPr()
+                tr_pr.append(OxmlElement('w:tblHeader'))
+            doc.save(source)
+
+            result = self._merge(source, output)
+            self.assertEqual(len(result.tables), 1)
+            self.assertEqual(
+                [[cell.text for cell in row.cells] for row in result.tables[0].rows],
+                [
+                    ["说明", "值"], ["前置", "x"], ["名称", "数值"], ["A", "1"],
+                    ["说明", "值"], ["前置", "y"], ["B", "2"],
+                ],
+            )
+            self.assertEqual(len(result.tables[0].rows), 7)
+
+    def test_different_headers_are_not_merged(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_tbl_merge_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            self._build_doc(
+                source,
+                [
+                    (("名称", "数值"), [("A", "1")]),
+                    (("项目", "金额"), [("B", "2")]),
+                ],
+            )
+
+            doc = self._merge(source, output)
+            self.assertEqual(len(doc.tables), 2)
+
+    def test_disabled_option_keeps_tables(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_tbl_merge_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "in.docx", root / "out.docx"
+            self._build_doc(
+                source,
+                [
+                    (("名称", "数值"), [("A", "1")]),
+                    (("名称", "数值"), [("B", "2")]),
+                ],
+            )
+
+            doc = self._merge(source, output, enabled=False)
+            self.assertEqual(len(doc.tables), 2)
+
+    def test_clean_preset_enables_option(self):
+        self.assertTrue(
+            apply_preset(dict(DEFAULT_CONFIG), 'clean')['merge_repeated_table_headers']
+        )
+        self.assertFalse(DEFAULT_CONFIG['merge_repeated_table_headers'])
+
+
 class OoxmlProtectionTests(unittest.TestCase):
     def test_ooxml_element_detection(self):
         doc = Document()
@@ -936,6 +1048,29 @@ class StructuralHeadingLevelTests(unittest.TestCase):
         vals = [self._outline_val(p) for p in out.paragraphs if p.text.strip()]
         self.assertEqual(vals, [None])
 
+    def test_broken_line_after_long_heading_is_merged_before_heading_detection(self):
+        # 断行合并先于版式标题识别：长标题型行 + 跨行词续行应先合成一段，
+        # 合成后无“专属下文”，该行也不应被标题化。
+        config = DEFAULT_CONFIG.copy()
+        config['merge_continuous_lines'] = True
+        out = self._format(
+            ['1.1 总体要求', '（1）本条适用于高压引气系统，高压九级接', '替供气。'],
+            config=config,
+        )
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(len(paras), 2, f"断行应先合并: {[p.text for p in paras]}")
+        self.assertEqual(paras[1].text, '（1）本条适用于高压引气系统，高压九级接替供气。')
+        self.assertIn(self._outline_val(paras[1]), (None, 9), "合并后不应被标题化")
+
+    def test_short_heading_still_keeps_its_body(self):
+        # 短标题 + 正文是正常结构，不能被断行合并吞掉
+        config = DEFAULT_CONFIG.copy()
+        config['merge_continuous_lines'] = True
+        out = self._format(['（1）子项甲', '子项甲正文。'], config=config)
+        paras = [p for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(len(paras), 2)
+        self.assertEqual(self._outline_val(paras[0]), 3)
+
     def test_remove_headers_footers(self):
         out = self._format(['正文内容'], add_header_footer=True,
                            config=apply_preset(DEFAULT_CONFIG.copy(), 'clean'))
@@ -1145,6 +1280,41 @@ class DeepestHeadingWithoutBodyTests(unittest.TestCase):
             finally:
                 processor._cleanup_temp_files()
 
+    def _format_paragraphs(self, lines):
+        with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "sample.docx"
+            doc = Document()
+            for line in lines:
+                doc.add_paragraph(line)
+            doc.save(source)
+            processor = WordProcessor(DEFAULT_CONFIG.copy())
+            output = root / "out.docx"
+            try:
+                processor.format_document(str(source), str(output))
+                return [p for p in Document(output).paragraphs if p.text.strip()]
+            finally:
+                processor._cleanup_temp_files()
+
+    def test_last_label_in_consecutive_run_with_only_group_explanation_is_body(self):
+        # （1）（2）都无专属正文已降级；末项（3）后的正文是整组说明，
+        # 不是（3）的专属下文，末项同样不应被标题化。
+        paras = self._format_paragraphs([
+            '（1）子项甲', '（2）子项乙', '（3）子项丙',
+            '以上是本条各子项的总体说明。',
+        ])
+        vals = [self._outline_val(p) for p in paras]
+        self.assertEqual(vals, [9, 9, 9, None], f"实际: {vals}")
+
+    def test_last_label_with_own_body_keeps_level(self):
+        # 每个标号都有自己正文时，末项仍应保持标题
+        paras = self._format_paragraphs([
+            '（1）子项甲', '子项甲正文。', '（2）子项乙', '子项乙正文。',
+            '（3）子项丙', '子项丙正文。',
+        ])
+        vals = [self._outline_val(p) for p in paras]
+        self.assertEqual(vals[4], 3, f"实际: {vals}")
+
     def test_pure_heading_hierarchy_only_deepest_level_demoted(self):
         # 纯标题、零正文：只把最末级别降为正文，上级标题因有更深下级而保留。
         with tempfile.TemporaryDirectory(prefix="wfp_deep_") as tmpdir:
@@ -1261,9 +1431,9 @@ class PresetGroupTests(unittest.TestCase):
     def test_apply_preset_merges_without_mutating_source(self):
         base = dict(DEFAULT_CONFIG)
         merged = apply_preset(base, 'clean')
-        self.assertTrue(merged['merge_broken_lines'])
+        self.assertTrue(merged['merge_continuous_lines'])
         self.assertTrue(merged['normalize_punctuation'])
-        self.assertFalse(base['merge_broken_lines'], '原字典不应被修改')
+        self.assertFalse(base['merge_continuous_lines'], '原字典不应被修改')
         with self.assertRaises(KeyError):
             apply_preset(base, 'unknown')
 
@@ -1320,21 +1490,13 @@ class ChapterSectionDetectionTests(unittest.TestCase):
         self.assertIsNone(processor._chapter_section_level('第一节的内容详见下一章。'))
 
 
-class BrokenLineMergeTests(unittest.TestCase):
-    FULL_LINE = '发动机引气正常时从压气级第五级引出，高压九级接替供气'
-
-    def _build_broken_doc(self, path):
-        doc = Document()
-        doc.add_paragraph('标题一')
-        for _ in range(3):
-            for _ in range(3):
-                doc.add_paragraph(self.FULL_LINE)
-            doc.add_paragraph('末行。')
-        doc.save(path)
+class ContinuousLineMergeTests(unittest.TestCase):
+    SPLIT_HEAD = '发动机引气正常时从压气级第五级引出，高压九级接'
+    SPLIT_TAIL = '替供气。'
 
     def _run(self, source, output, merge=True):
         config = DEFAULT_CONFIG.copy()
-        config['merge_broken_lines'] = merge
+        config['merge_continuous_lines'] = merge
         processor = WordProcessor(config)
         try:
             processor.format_document(str(source), str(output))
@@ -1342,22 +1504,47 @@ class BrokenLineMergeTests(unittest.TestCase):
             processor._cleanup_temp_files()
         return [para.text.strip() for para in Document(output).paragraphs if para.text.strip()]
 
-    def test_broken_lines_are_merged_into_paragraphs(self):
+    def _merge_doc(self, path, paragraphs):
+        doc = Document()
+        for text in paragraphs:
+            doc.add_paragraph(text)
+        doc.save(path)
+
+    def test_word_split_across_lines_is_merged(self):
         with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
             root = Path(tmpdir)
             source, output = root / "broken.docx", root / "merged.docx"
-            self._build_broken_doc(source)
+            self._merge_doc(source, ['标题一'] + [self.SPLIT_HEAD, self.SPLIT_TAIL] * 3)
 
             texts = self._run(source, output)
+            expected = self.SPLIT_HEAD + self.SPLIT_TAIL
             self.assertEqual(len(texts), 4, f"应还原为 4 段，实际 {len(texts)}: {texts}")
             for text in texts[1:]:
-                self.assertEqual(text, self.FULL_LINE * 3 + '末行。')
+                self.assertEqual(text, expected)
+
+    def test_sentence_end_punctuation_stops_merging(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "sentences.docx", root / "sentences_out.docx"
+            paragraphs = ['第一段内容已经完整结束。', '第二段另行开始描述。']
+            self._merge_doc(source, paragraphs)
+
+            texts = self._run(source, output)
+            self.assertEqual(texts, paragraphs, f"句号结尾的段落不应合并: {texts}")
+
+    def test_comma_ending_line_is_merged(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "comma.docx", root / "comma_out.docx"
+            self._merge_doc(source, ['本条规定了适用范围，', '具体内容见下表。'])
+
+            texts = self._run(source, output)
+            self.assertEqual(texts, ['本条规定了适用范围，具体内容见下表。'], f"实际: {texts}")
 
     def test_normal_document_is_left_alone(self):
         with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
             root = Path(tmpdir)
             source, output = root / "normal.docx", root / "normal_out.docx"
-            doc = Document()
             paragraphs = [
                 '这是一段普通长度的正文内容，用来确认不会被误合并。',
                 '另一段长度与前面不同的正文。',
@@ -1365,9 +1552,7 @@ class BrokenLineMergeTests(unittest.TestCase):
                 '短句。',
                 '最后一段正文内容也保持原样。',
             ]
-            for text in paragraphs:
-                doc.add_paragraph(text)
-            doc.save(source)
+            self._merge_doc(source, paragraphs)
 
             texts = self._run(source, output)
             self.assertEqual(len(texts), len(paragraphs))
@@ -1376,17 +1561,112 @@ class BrokenLineMergeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
             root = Path(tmpdir)
             source, output = root / "mixed.docx", root / "mixed_out.docx"
-            doc = Document()
-            for _ in range(3):
-                doc.add_paragraph(self.FULL_LINE)
-            doc.add_paragraph('一、注意事项')
-            for _ in range(3):
-                doc.add_paragraph(self.FULL_LINE)
-            doc.save(source)
+            self._merge_doc(
+                source,
+                [self.SPLIT_HEAD, self.SPLIT_TAIL, '一、注意事项', self.SPLIT_HEAD, self.SPLIT_TAIL],
+            )
 
             texts = self._run(source, output)
             self.assertIn('一、注意事项', texts, f"标题行应保持独立: {texts}")
-            self.assertEqual(len([t for t in texts if self.FULL_LINE in t]), 2, f"实际: {texts}")
+            self.assertEqual(
+                texts, [self.SPLIT_HEAD + self.SPLIT_TAIL, '一、注意事项', self.SPLIT_HEAD + self.SPLIT_TAIL],
+                f"实际: {texts}",
+            )
+
+    def test_feature_disabled_leaves_broken_lines(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_merge_test_") as tmpdir:
+            root = Path(tmpdir)
+            source, output = root / "disabled.docx", root / "disabled_out.docx"
+            lines = [self.SPLIT_HEAD, self.SPLIT_TAIL]
+            self._merge_doc(source, lines)
+
+            texts = self._run(source, output, merge=False)
+            self.assertEqual(texts, lines, f"关闭开关后不应合并: {texts}")
+
+
+class KeepSourceExtensionTests(unittest.TestCase):
+    HEAD = '发动机引气正常时从压气级第五级引出，高压九级接'
+    TAIL = '替供气。'
+
+    def _run(self, source, output, config=None):
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update(config or {})
+        processor = WordProcessor(cfg)
+        try:
+            processor.format_document(str(source), str(output))
+        finally:
+            processor._cleanup_temp_files()
+
+    def test_md_output_keeps_extension_and_merges_broken_lines(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.md"
+            source.write_text(
+                "# 标题\n\n" + self.HEAD + "\n" + self.TAIL + "\n\n"
+                "| 列1 | 列2 |\n| --- | --- |\n| a | b |\n",
+                encoding="utf-8",
+            )
+            output = root / "output.md"
+            self._run(source, output, {
+                'keep_source_extension': True,
+                'merge_continuous_lines': True,
+            })
+
+            self.assertTrue(output.exists())
+            content = output.read_text(encoding="utf-8")
+            self.assertIn("# 标题", content, "Markdown 标题应原样保留")
+            self.assertIn("| 列1 | 列2 |", content, "Markdown 表格应原样保留")
+            self.assertIn(self.HEAD + self.TAIL, content, "断行应被合并")
+            self.assertNotIn(self.TAIL + "\n", content.replace(self.HEAD + self.TAIL, ""))
+
+    def test_txt_output_keeps_extension(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.txt"
+            source.write_text(self.HEAD + "\n" + self.TAIL + "\n", encoding="utf-8")
+            output = root / "output.txt"
+            self._run(source, output, {
+                'keep_source_extension': True,
+                'merge_continuous_lines': True,
+            })
+
+            self.assertTrue(output.exists())
+            self.assertEqual(
+                output.read_text(encoding="utf-8").strip(), self.HEAD + self.TAIL
+            )
+
+    def test_disabled_option_still_outputs_docx(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.md"
+            source.write_text("# 标题\n\n正文内容。\n", encoding="utf-8")
+            output = root / "output.docx"
+            self._run(source, output, {'keep_source_extension': False})
+
+            self.assertTrue(output.exists())
+            self.assertTrue(Document(output).paragraphs)
+
+    def test_word_only_options_are_skipped_in_text_output(self):
+        with tempfile.TemporaryDirectory(prefix="wfp_keep_ext_") as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.txt"
+            source.write_text("一、总体要求\n正文内容。\n", encoding="utf-8")
+            output = root / "output.txt"
+            self._run(source, output, {
+                'keep_source_extension': True,
+                'normalize_heading_levels': True,
+                'set_outline': True,
+                'enable_table_formatting': True,
+                'remove_headers_footers': True,
+            })
+
+            content = output.read_text(encoding="utf-8")
+            self.assertIn("一、总体要求", content)
+            self.assertIn("正文内容。", content)
+
+    def test_clean_preset_enables_option(self):
+        self.assertTrue(apply_preset(dict(DEFAULT_CONFIG), 'clean')['keep_source_extension'])
+        self.assertFalse(DEFAULT_CONFIG['keep_source_extension'])
 
 
 class LevelStyleUnificationTests(unittest.TestCase):

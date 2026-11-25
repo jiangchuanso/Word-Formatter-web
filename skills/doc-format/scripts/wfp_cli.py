@@ -14,6 +14,7 @@ from wfp_config import DEFAULT_CONFIG, FONT_SIZE_MAP, PRESET_GROUPS, apply_prese
 from wfp_core import (
     BLANK_LINE_MODE_OPTIONS,
     LegacyConversionUnavailable,
+    output_extension_for,
     SUPPORTED_FILE_EXTENSIONS,
     WordProcessor,
     WPSAppManager,
@@ -107,7 +108,9 @@ CONFIG_DESCRIPTIONS = {
     "media_single_line_spacing": ("图片行单倍行距", "true/false，含图片/嵌入对象的段落改为单倍行距"),
     "normalize_heading_levels": ("标题等级合并优化", "true/false，同格式标题归并等级并补齐跳级，需开启 set_outline"),
     "detect_chapter_section": ("章/节层级识别", "true/false，第X章=1级、第X节=2级，其后编号标题整体顺延"),
-    "merge_broken_lines": ("等长断行合并", "true/false，把 PDF 粘贴造成的等长断行还原为整段"),
+    "merge_continuous_lines": ("前后行词语连续合并", "true/false，把 PDF 粘贴造成的断行按标点与词语连续性还原为整段"),
+    "keep_source_extension": ("保持源文件后缀", "true/false，txt/md 直接输出同名同后缀文本，仅做前后行词语连续合并，其余选项跳过"),
+    "merge_repeated_table_headers": ("相同表头连续表格合并", "true/false，合并相邻且表头相同的表格并去除重复表头"),
     "enable_table_formatting": ("表格内容自动调整", "true/false"),
     "clear_unused_styles": ("清除未使用自定义样式", "true/false，删除文档中未被引用的自定义（非内置）样式，默认开启"),
     "remove_headers_footers": ("删除页眉页脚", "true/false，删除各节的页眉页脚内容（排版清洗默认开启）"),
@@ -257,10 +260,18 @@ def apply_convenience_overrides(config, args):
         config["detect_chapter_section"] = True
     if getattr(args, "disable_detect_chapter_section", False):
         config["detect_chapter_section"] = False
-    if getattr(args, "merge_broken_lines", False):
-        config["merge_broken_lines"] = True
-    if getattr(args, "disable_merge_broken_lines", False):
-        config["merge_broken_lines"] = False
+    if getattr(args, "merge_continuous_lines", False):
+        config["merge_continuous_lines"] = True
+    if getattr(args, "disable_merge_continuous_lines", False):
+        config["merge_continuous_lines"] = False
+    if getattr(args, "keep_source_extension", False):
+        config["keep_source_extension"] = True
+    if getattr(args, "disable_keep_source_extension", False):
+        config["keep_source_extension"] = False
+    if getattr(args, "merge_repeated_table_headers", False):
+        config["merge_repeated_table_headers"] = True
+    if getattr(args, "disable_merge_repeated_table_headers", False):
+        config["merge_repeated_table_headers"] = False
     if getattr(args, "use_builtin_styles", False):
         config["use_builtin_styles"] = True
     if getattr(args, "disable_builtin_styles", False):
@@ -337,9 +348,9 @@ def collect_records(paths, recursive=True):
     return records
 
 
-def formatted_relative_path(relative):
-    """输出沿用原文件名（只把扩展名换成 .docx），不再追加 _formatted 后缀。"""
-    return relative.with_name(f"{relative.stem}.docx")
+def formatted_relative_path(relative, extension='.docx'):
+    """输出沿用原文件名（只替换扩展名），不再追加 _formatted 后缀。"""
+    return relative.with_name(f"{relative.stem}{extension}")
 
 
 def unique_path(path, seen, source=None):
@@ -353,18 +364,20 @@ def unique_path(path, seen, source=None):
     return candidate
 
 
-def build_jobs(input_paths, output_arg, recursive=True):
+def build_jobs(input_paths, output_arg, recursive=True, config=None):
     records = collect_records(input_paths, recursive=recursive)
     output_path = Path(output_arg).expanduser().resolve() if output_arg else None
+    config = config or {}
 
     if len(records) == 1 and records[0].source.is_file():
         source = records[0].source
+        extension = output_extension_for(config, source)
         if output_path is None:
-            output = source.with_name(f"{source.stem}.docx")
-        elif output_path.suffix.lower() == ".docx":
-            output = output_path
+            output = source.with_name(f"{source.stem}{extension}")
+        elif output_path.suffix.lower() in (".docx", ".txt", ".md"):
+            output = output_path.with_suffix(extension)
         else:
-            output = output_path / f"{source.stem}.docx"
+            output = output_path / f"{source.stem}{extension}"
         if output == source:
             output = unique_path(output, set(), source)
         return [Job(source, output)]
@@ -376,14 +389,15 @@ def build_jobs(input_paths, output_arg, recursive=True):
         else:
             output_dir = Path.cwd() / "wfp_formatted"
     else:
-        if output_path.suffix.lower() == ".docx":
-            raise ValueError("多文件或目录输入时，--output 必须是输出目录，不能是单个 .docx 文件。")
+        if output_path.suffix.lower() in (".docx", ".txt", ".md"):
+            raise ValueError("多文件或目录输入时，--output 必须是输出目录，不能是单个文件。")
         output_dir = output_path
 
     jobs = []
     seen = set()
     for record in records:
-        target = output_dir / formatted_relative_path(record.relative)
+        extension = output_extension_for(config, record.source)
+        target = output_dir / formatted_relative_path(record.relative, extension)
         jobs.append(Job(record.source, unique_path(target, seen, record.source)))
     return jobs
 
@@ -404,7 +418,9 @@ def format_paths(args):
         log(f"使用配置: {config_source}")
 
     try:
-        jobs = build_jobs(input_paths, args.output, recursive=not args.no_recursive)
+        jobs = build_jobs(
+            input_paths, args.output, recursive=not args.no_recursive, config=config
+        )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -454,7 +470,7 @@ def show_config(args):
         "version": __version__,
         "config_file_auto_load": str((Path.cwd() / CONFIG_FILE_NAME).resolve()),
         "supported_inputs": sorted(SUPPORTED_EXTENSIONS),
-        "output": "单文件输出 .docx；多文件或目录输出到目录，目录输入会递归保留原目录结构。",
+        "output": "单文件默认输出 .docx；开启 keep_source_extension 后 txt/md 输出保持源后缀；多文件或目录输出到目录，目录输入会递归保留原目录结构。",
         "legacy_conversion": ".doc/.wps 在 Windows 优先使用 WPS/Word COM；macOS/Kylin/Linux 或 COM 失败时尝试 LibreOffice soffice；macOS/Kylin/Linux 未安装 LibreOffice 时会跳过旧格式文件。",
         "font_size_names": {str(key): value for key, value in FONT_SIZE_NAMES.items()},
         "blank_line_modes": BLANK_LINE_MODE_OPTIONS,
@@ -472,7 +488,9 @@ def show_config(args):
             "media_single_line_spacing=true 含图片/嵌入对象的段落改为单倍行距",
             "normalize_heading_levels=true 相同格式标题归并等级并补齐跳级（需 set_outline=true）",
             "detect_chapter_section=true 第X章/第X节识别为 1/2 级标题，编号标题整体顺延",
-            "merge_broken_lines=true 合并等长断行，还原 PDF 粘贴导致的段落断裂",
+            "merge_continuous_lines=true 按标点与前后行词语连续性合并断行，还原 PDF 粘贴导致的段落断裂",
+            "keep_source_extension=true txt/md 输出保持源文件后缀，仅执行前后行词语连续合并，其余选项跳过",
+            "merge_repeated_table_headers=true 合并相邻且表头相同的表格，去除重复表头行",
             "clear_unused_styles=true 清除文档中未被引用的自定义（非内置）样式（默认开启）",
             "remove_headers_footers=true 删除各节的页眉页脚内容",
         ],
@@ -533,8 +551,12 @@ def add_config_override_args(parser):
     parser.add_argument("--disable-normalize-heading-levels", action="store_true", help="关闭标题等级合并优化")
     parser.add_argument("--detect-chapter-section", action="store_true", help="把第X章/第X节识别为 1/2 级标题，其后编号标题整体顺延")
     parser.add_argument("--disable-detect-chapter-section", action="store_true", help="关闭章/节层级识别")
-    parser.add_argument("--merge-broken-lines", action="store_true", help="合并等长断行（还原 PDF 粘贴导致的段落断裂）")
-    parser.add_argument("--disable-merge-broken-lines", action="store_true", help="关闭等长断行合并")
+    parser.add_argument("--merge-continuous-lines", action="store_true", help="按标点与前后行词语连续性合并断行（还原 PDF 粘贴导致的段落断裂）")
+    parser.add_argument("--disable-merge-continuous-lines", action="store_true", help="关闭前后行词语连续合并")
+    parser.add_argument("--keep-source-extension", action="store_true", help="txt/md 输出保持源文件后缀，仅做前后行词语连续合并（排版清洗预设默认开启）")
+    parser.add_argument("--disable-keep-source-extension", action="store_true", help="关闭保持源文件后缀，统一输出 docx")
+    parser.add_argument("--merge-repeated-table-headers", action="store_true", help="合并相邻且表头相同的表格，去除重复表头（排版清洗预设默认开启）")
+    parser.add_argument("--disable-merge-repeated-table-headers", action="store_true", help="关闭相同表头连续表格合并")
     parser.add_argument("--use-builtin-styles", action="store_true", help="用内置标准样式（正文/标题 1~4）统一同级文字（默认开启）")
     parser.add_argument("--disable-builtin-styles", action="store_true", help="关闭标准样式统一，改用逐段直接格式")
     parser.add_argument("--detect-article-title", action="store_true", help="识别“第X条”为条标题并在条后分段（默认开启）")
