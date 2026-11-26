@@ -2616,6 +2616,41 @@ class ArticleTitleTests(unittest.TestCase):
         self.assertEqual(paras[0].text, "第一条 为规范管理，制定本规定。")
         self.assertEqual(paras[0].style.name, "Normal")
 
+    def test_dotted_article_levels_follow_number_depth(self):
+        def build(doc):
+            doc.add_paragraph("第1条 目的")
+            doc.add_paragraph("正文一。")
+            doc.add_paragraph("第1.1条 范围")
+            doc.add_paragraph("正文二。")
+            doc.add_paragraph("第12.34条 细则")
+            doc.add_paragraph("正文三。")
+            doc.add_paragraph("第1.1.1条 深层")
+            doc.add_paragraph("正文四。")
+
+        formatted = self._format(build)
+        headings = [p for p in formatted.paragraphs if p.style.name.startswith("Heading")]
+        self.assertEqual([self._outline_val(p) for p in headings], [0, 1, 1, 2])
+
+    def test_dotted_article_follows_chapter_level(self):
+        def build(doc):
+            doc.add_paragraph("第一章 总则")
+            doc.add_paragraph("第1条 目的")
+            doc.add_paragraph("正文一。")
+            doc.add_paragraph("第1.1条 子项")
+            doc.add_paragraph("正文二。")
+
+        formatted = self._format(build)
+        headings = [p for p in formatted.paragraphs if p.style.name.startswith("Heading")]
+        self.assertEqual([self._outline_val(p) for p in headings], [0, 1, 2])
+
+    def test_dotted_article_accepts_fullwidth_dot(self):
+        def build(doc):
+            doc.add_paragraph("第1．1条 范围")
+            doc.add_paragraph("正文。")
+
+        formatted = self._format(build)
+        self.assertEqual(self._outline_val(formatted.paragraphs[0]), 1)
+
 
 class OutputNamingTests(unittest.TestCase):
     """输出文件保持原文件名，不再追加 _formatted 后缀，且不覆盖源文件。"""

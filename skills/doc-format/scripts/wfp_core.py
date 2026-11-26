@@ -219,8 +219,12 @@ RE_CHAPTER_TITLE = re.compile(
     r'^(?:第\s*[一二三四五六七八九十百千万零〇\d]+\s*章|ATA\s*\d+\s*章)', re.IGNORECASE
 )
 RE_SECTION_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]+\s*节')
-# 条标题：第X条 / 第XX条 / 第XXX条，级别跟随章/节顺延（无章无节时为 1 级）
-RE_ARTICLE_TITLE = re.compile(r'^第\s*[一二三四五六七八九十百千万零〇\d]{1,6}\s*条')
+# 条标题：第X条 / 第XX条 / 第X.X条 / 第XX.XX条（点号支持半角/全角），
+# 级别跟随章/节顺延，点分编号每多一段再深一级（无章无节时第X条为 1 级）。
+_ARTICLE_NUM_SEGMENT = r'[一二三四五六七八九十百千万零〇\d]{1,6}'
+RE_ARTICLE_TITLE = re.compile(
+    rf'^第\s*{_ARTICLE_NUM_SEGMENT}(?:\s*[.．]\s*{_ARTICLE_NUM_SEGMENT})*\s*条'
+)
 
 # 前后行词语连续合并（PDF 粘贴常见）：句末/续句标点、jieba 跨行词探测、满行长度下限
 MERGE_SENTENCE_END_PUNCTUATION = '。！？；!?…'
@@ -3148,10 +3152,19 @@ class WordProcessor:
         return None
 
     # ------------------------------------------------------------------
-    # 条标题：第X条
+    # 条标题：第X条 / 第X.X条
     # ------------------------------------------------------------------
+    @staticmethod
+    def _article_number_depth(text):
+        """「第X条」编号段数：第1条→1、第1.1条→2、第1.1.1条→3；不匹配时返回 0。"""
+        match = RE_ARTICLE_TITLE.match((text or '').strip())
+        if not match:
+            return 0
+        number = match.group(0)
+        return number.count('.') + number.count('．') + 1
+
     def _article_title_level(self, text):
-        """「第X条」条标题的绝对大纲级别：章/节之下顺延一级，无章无节时为 1 级。"""
+        """条标题的绝对大纲级别：章/节之下顺延，点分编号每多一段再深一级。"""
         if not self.config.get('detect_article_title', True):
             return None
         value = (text or '').strip()
@@ -3159,9 +3172,10 @@ class WordProcessor:
             return None
         if any(punct in value for punct in BODY_SENTENCE_PUNCTUATION):
             return None
-        if not RE_ARTICLE_TITLE.match(value):
+        depth = self._article_number_depth(value)
+        if not depth:
             return None
-        return min(self._article_level, MAX_TITLE_OUTLINE_LEVEL)
+        return min(self._article_level + depth - 1, MAX_TITLE_OUTLINE_LEVEL)
 
     def _split_article_paragraphs(self, doc):
         """把「第X条 正文……」拆成两段：条标题独立成段，其余文字另起一段作正文。"""
