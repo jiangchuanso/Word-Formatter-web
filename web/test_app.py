@@ -203,9 +203,11 @@ class ContentSniffTests(unittest.TestCase):
             reason = webapp._content_mismatch_reason(".docx", detected, b"")
             self.assertIsNotNone(reason, detected)
             self.assertIn("不符", reason)
-        # 纯文本后缀出现任何二进制类型 → 拦截
+        # 纯文本后缀遇到真实二进制内容（含 NUL）→ 拦截
         for ext in (".txt", ".md"):
-            self.assertIsNotNone(webapp._content_mismatch_reason(ext, "exe", b"hello"))
+            self.assertIsNotNone(
+                webapp._content_mismatch_reason(ext, "exe", b"MZ\x90\x00\x03\x00\x00\x00")
+            )
 
     def test_unrecognized_non_text_rejected(self):
         # 非纯文本 filetype 认不出 → 不放行（.docx 无 zip 结构；.doc/.wps 无 OLE2 头）
@@ -219,9 +221,35 @@ class ContentSniffTests(unittest.TestCase):
 
     def test_text_files(self):
         self.assertIsNone(webapp._content_mismatch_reason(".txt", None, "中文内容\nhello".encode("utf-8")))
-        self.assertIsNone(webapp._content_mismatch_reason(".md", None, "# 标题\n正文".encode("gbk")))
-        # 含 NUL 字节 → 视为二进制，不放行
-        self.assertIsNotNone(webapp._content_mismatch_reason(".txt", None, b"\xff\xfe\x00\x01"))
+        self.assertIsNone(webapp._content_mismatch_reason(".md", None, "# 标题\r\n正文".encode("gbk")))
+        # 无 BOM 的 NUL 字节 → 视为二进制，不放行
+        self.assertIsNotNone(webapp._content_mismatch_reason(".txt", None, b"\x7fELF\x01\x01\x01\x00"))
+
+    def test_text_header_split_multibyte(self):
+        """8192 字节截片切断 UTF-8 中文字符时仍应识别为文本（CRLF 会改变切点）。"""
+        base = ("# 标题\r\n正文段落\r\n" * 700).encode("utf-8")
+        checked = 0
+        for pad in range(32):
+            header = (b"x" * pad + base)[:webapp._HEADER_BYTES]
+            try:
+                header.decode("utf-8")
+                continue
+            except UnicodeDecodeError:
+                pass
+            checked += 1  # 截片末尾切断了一个多字节字符
+            self.assertIsNone(webapp._content_mismatch_reason(".md", None, header), pad)
+        self.assertGreater(checked, 0, "未构造出跨边界的 UTF-8 截片")
+
+    def test_text_signature_false_positive(self):
+        """filetype 的两字节宽松签名不能把纯文本 md 判成二进制。"""
+        for detected, prefix in (("bmp", b"BMW"), ("ps", b"%!PS"), ("exe", b"MZ-80")):
+            header = prefix + "\r\n中文正文".encode("utf-8")
+            self.assertIsNone(webapp._content_mismatch_reason(".md", detected, header))
+
+    def test_utf16_text_files(self):
+        for bom, enc in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+            header = bom + "# 标题\r\n正文\r\n".encode(enc)
+            self.assertIsNone(webapp._content_mismatch_reason(".md", None, header))
 
 
 class ApiTests(unittest.TestCase):

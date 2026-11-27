@@ -14,6 +14,7 @@ Office / LibreOffice 安装在服务器端（仅处理 .doc/.wps 旧格式时由
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import math
@@ -91,7 +92,7 @@ for d in (UPLOAD_DIR, OUTPUT_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # 可通过环境变量调整的服务端限制
-MAX_UPLOAD_BYTES = int(os.environ.get("WFP_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+MAX_UPLOAD_BYTES = int(os.environ.get("WFP_MAX_UPLOAD_MB", "1000")) * 1024 * 1024
 MAX_FILES_PER_JOB = int(os.environ.get("WFP_MAX_FILES", "50"))
 MAX_TEXT_CHARS = int(os.environ.get("WFP_MAX_TEXT_CHARS", "500000"))
 JOB_TTL_SEC = int(os.environ.get("WFP_JOB_TTL_HOURS", "24")) * 3600
@@ -522,11 +523,14 @@ async def index():
 #   .docx        必须识别为 docx（识别不出/识别成 zip、pdf 等一律拦截）
 #   .doc / .wps  识别为 doc 放行；识别不出但头部是 OLE2 复合文档则放行
 #                （合法老版 Word/WPS；filetype 的 Doc matcher 签名苛刻，认不出属正常）
-#   .txt / .md   必须「识别不出 + 内容确实像纯文本」才放行，否则拦截
+#   .txt / .md   只要内容能按项目支持的编码解码为文本就放行；filetype 的签名
+#               匹配过于宽松（"BM"/"%!"/"MZ" 两字节即判定为二进制），纯文本开头
+#               撞上这些签名不能作为拦截依据。含 NUL 或全编码失败的一律拦截。
 # filetype 认不出且无结构兜底的非纯文本一律不放行。
 # --------------------------------------------------------------------------- #
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "gb18030")  # 与 wfp_core._read_text_file 一致
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "gb18030")  # 与 wfp_core._read_text_file 一致（UTF-16 走 BOM 分支）
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 _HEADER_BYTES = 8192
 
 
@@ -543,12 +547,26 @@ def _is_ole2(header: bytes) -> bool:
 
 
 def _is_probably_text(header: bytes) -> bool:
-    """按项目支持的编码试解码；含 NUL 或全编码失败视为二进制。"""
-    if not header or b"\x00" in header:
+    """按项目支持的编码试解码；含 NUL 或全编码失败视为二进制。
+
+    header 是定长截片，末尾可能恰好切断一个多字节字符。用增量解码器
+    （final=False）让未完成的尾序列留在缓冲区而不报错，避免 8192 字节
+    边界处误判为二进制（表现之一就是 md 文件「有时换行符改一下就好了」）。
+    """
+    if not header:
+        return False
+    # UTF-16（Windows 记事本/WPS 另存常见）：BOM 后的 NUL 是正常字节
+    if header.startswith(_UTF16_BOMS):
+        try:
+            codecs.getincrementaldecoder("utf-16")().decode(header, final=False)
+            return True
+        except UnicodeDecodeError:
+            return False
+    if b"\x00" in header:
         return False
     for enc in _TEXT_ENCODINGS:
         try:
-            header.decode(enc)
+            codecs.getincrementaldecoder(enc)().decode(header, final=False)
             return True
         except UnicodeDecodeError:
             continue
@@ -586,8 +604,8 @@ def _content_mismatch_reason(ext: str, detected, header: bytes) -> str | None:
         return f"文件内容实际为 {detected} 格式，与后缀 {ext} 不符"
 
     if ext in (".txt", ".md"):
-        if detected is not None:
-            return f"文件内容实际为 {detected} 二进制格式，与后缀 {ext} 不符"
+        # 以内容能否解码为文本为准：filetype 对 "BM"/"%!"/"MZ" 等两字节签名
+        # 会误报二进制，真正的 exe/zip/docx 则含 NUL 或非法字节序列，仍会被拦下。
         if not _is_probably_text(header):
             return f"文件内容不是有效的纯文本，与后缀 {ext} 不符"
         return None

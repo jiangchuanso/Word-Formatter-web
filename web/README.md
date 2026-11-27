@@ -66,7 +66,7 @@ python web/app.py
 |------|--------|------|
 | `WFP_HOST` | `0.0.0.0` | 监听地址，设为 `127.0.0.1` 仅本机可访问 |
 | `WFP_PORT` | `4618` | 监听端口（`start.bat` / `start.sh` / `app.py` 三处一致） |
-| `WFP_MAX_UPLOAD_MB` | `100` | 单个上传文件大小上限（MB） |
+| `WFP_MAX_UPLOAD_MB` | `1000` | 单个上传文件大小上限（MB） |
 | `WFP_MAX_FILES` | `50` | 单次提交的文件数量上限 |
 | `WFP_MAX_TEXT_CHARS` | `500000` | 直接输入文本的长度上限（字符） |
 | `WFP_JOB_TTL_HOURS` | `24` | 输出文件与任务状态的保留时长 |

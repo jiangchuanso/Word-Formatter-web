@@ -1505,7 +1505,13 @@ class WordProcessor:
     @staticmethod
     def _read_text_file(path):
         """Try multiple encodings to read text file"""
-        for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb18030']:
+        with open(path, 'rb') as f:
+            bom = f.read(2)
+        # UTF-16 文本文件（记事本/WPS 另存常见），BOM 决定字节序
+        encodings = ['utf-16'] if bom in (b'\xff\xfe', b'\xfe\xff') else [
+            'utf-8', 'utf-8-sig', 'gbk', 'gb18030'
+        ]
+        for enc in encodings:
             try:
                 with open(path, 'r', encoding=enc) as f:
                     content = f.read()

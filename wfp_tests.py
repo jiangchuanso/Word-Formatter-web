@@ -30,6 +30,19 @@ from wfp_core import (
 )
 
 
+class TextFileEncodingTests(unittest.TestCase):
+    def test_read_utf16_text_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            for bom, enc in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+                path = Path(td) / "sample.md"
+                path.write_bytes(bom + "# 标题\r\n正文\r\n".encode(enc))
+                # 文本模式统一换行符，与 UTF-8/GBK 读取行为一致
+                self.assertEqual(
+                    WordProcessor._read_text_file(path),
+                    "# 标题\n正文\n",
+                )
+
+
 class TextNormalizationTests(unittest.TestCase):
     def test_symbol_normalization_keeps_decimal_numbers(self):
         self.assertEqual(
