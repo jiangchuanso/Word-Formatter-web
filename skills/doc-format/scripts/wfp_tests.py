@@ -1951,6 +1951,23 @@ class TextCleanupTests(unittest.TestCase):
         self.assertEqual(clean('5. 6．序号不同保持原样'), '5. 6．序号不同保持原样')
         self.assertEqual(clean('1. 1.1 子项'), '1. 1.1 子项')
         self.assertEqual(clean('1. 俯身检查胎面'), '1. 俯身检查胎面')
+        self.assertEqual(clean('3. 3． 3. 航空器移动后'), '3. 航空器移动后')
+
+    def test_multi_layer_duplicate_numbering_converges(self):
+        source = '3. 3． 3. 航空器移动后，应再次执行轮胎检查；\n'
+        content = self._run_text(source, 'input.txt', self._cfg(
+            keep_source_extension=True,
+            remove_duplicate_numbering=True,
+        ))
+        self.assertIn('3. 航空器移动后，应再次执行轮胎检查；', content)
+        self.assertNotIn('3．', content)
+
+        out = self._run_docx(
+            ['3. 3． 3. 航空器移动后，应再次执行轮胎检查；'],
+            self._cfg(remove_duplicate_numbering=True),
+        )
+        texts = [p.text.strip() for p in out.paragraphs if p.text.strip()]
+        self.assertEqual(texts, ['3. 航空器移动后，应再次执行轮胎检查；'])
 
     def test_md_image_syntax_survives_symbol_normalization(self):
         source = (

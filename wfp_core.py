@@ -135,6 +135,8 @@ RE_CJK_SPACE_BEFORE = re.compile(
 RE_DUPLICATE_NUMBER = re.compile(
     r'^([0-9]{1,3})([.．])[ \t]*([0-9]{1,3})([.．])(?![0-9.．])[ \t]*(?=\S)'
 )
+# docling 可能叠加多层编号（「3. 3． 3. 标题」），单遍剥离不收敛，限制迭代上限。
+DUPLICATE_NUMBER_MAX_PASSES = 4
 # docling 页面模型会把页面级连续序号叠到真实子标号前：「2. (a) 内容」「4. (b) 内容」
 RE_LEADING_NUMBER_WITH_ALPHA = re.compile(
     r'^([0-9]{1,3})([.．])[ \t]+(?=[（(][A-Za-z][）)])'
@@ -1068,11 +1070,20 @@ class WordProcessor:
 
     @classmethod
     def _remove_duplicate_numbering_in_text_line(cls, line):
-        """「3. 3．标题」→「3. 标题」；序号不一致时保持原样，避免误删真实层级。"""
-        match = RE_DUPLICATE_NUMBER.match(line or '')
-        if not match or int(match.group(1)) != int(match.group(3)):
-            return line
-        return line[:match.end(2)] + ' ' + line[match.end(0):]
+        """「3. 3．标题」→「3. 标题」；序号不一致时保持原样，避免误删真实层级。
+
+        docling 可能叠加多层编号（「3. 3． 3. 标题」），反复剥离直到收敛。
+        """
+        result = line or ''
+        for _ in range(DUPLICATE_NUMBER_MAX_PASSES):
+            match = RE_DUPLICATE_NUMBER.match(result)
+            if not match or int(match.group(1)) != int(match.group(3)):
+                break
+            updated = result[:match.end(2)] + ' ' + result[match.end(0):]
+            if updated == result:
+                break
+            result = updated
+        return result
 
     def _paragraph_text_nodes(self, para):
         """收集段落可见字符及其来源 w:t 节点，非文本对象位置记为 None。"""
@@ -1278,13 +1289,23 @@ class WordProcessor:
         for para, text in zip(paragraphs, texts):
             if not self._cleanable_paragraph(para):
                 continue
-            match = RE_DUPLICATE_NUMBER.match(text.lstrip())
-            if not match or int(match.group(1)) != int(match.group(3)):
-                continue
-            shift = len(text) - len(text.lstrip())
-            if self._apply_paragraph_text_edits(
-                para, [(shift + match.end(2), shift + match.end(0), ' ')]
-            ):
+            current = text
+            cleaned = False
+            for _ in range(DUPLICATE_NUMBER_MAX_PASSES):
+                match = RE_DUPLICATE_NUMBER.match(current.lstrip())
+                if not match or int(match.group(1)) != int(match.group(3)):
+                    break
+                shift = len(current) - len(current.lstrip())
+                if not self._apply_paragraph_text_edits(
+                    para, [(shift + match.end(2), shift + match.end(0), ' ')]
+                ):
+                    break
+                cleaned = True
+                updated, _ = self._paragraph_text_nodes(para)
+                if updated == current:
+                    break
+                current = updated
+            if cleaned:
                 changes += 1
 
         spurious = self._spurious_leading_number_indices(texts)
