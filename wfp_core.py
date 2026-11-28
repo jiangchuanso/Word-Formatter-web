@@ -1331,8 +1331,14 @@ class WordProcessor:
         return changes
 
     def _remove_duplicate_numbering_in_text(self, text, source_ext):
-        lines = [self._remove_duplicate_numbering_in_text_line(line) for line in text.split('\n')]
+        lines = text.split('\n')
+        # 围栏代码块整段原样保留：必须在逐行剥离序号之前确定跳过区间，
+        # 否则代码行里的「3. 3．…」会被当成 PDF 冗余序号改写。
         skipped = self._md_fence_line_indices(lines, source_ext)
+        lines = [
+            line if index in skipped else self._remove_duplicate_numbering_in_text_line(line)
+            for index, line in enumerate(lines)
+        ]
         spurious = self._spurious_leading_number_indices(lines, skipped)
         numeric_cont = self._numbered_continuation_indices(lines, skipped)
         result = []
@@ -1507,9 +1513,11 @@ class WordProcessor:
         """Try multiple encodings to read text file"""
         with open(path, 'rb') as f:
             bom = f.read(2)
-        # UTF-16 文本文件（记事本/WPS 另存常见），BOM 决定字节序
+        # UTF-16 文本文件（记事本/WPS 另存常见），BOM 决定字节序；
+        # UTF-8 必须先试 utf-8-sig，否则 BOM 会作为 U+FEFF 留在正文里
+        # （破坏 Markdown 标题、行首列表等判据）。
         encodings = ['utf-16'] if bom in (b'\xff\xfe', b'\xfe\xff') else [
-            'utf-8', 'utf-8-sig', 'gbk', 'gb18030'
+            'utf-8-sig', 'utf-8', 'gbk', 'gb18030'
         ]
         for enc in encodings:
             try:
@@ -4602,9 +4610,12 @@ class WordProcessor:
     def _merge_text_lines(self, text, source_ext):
         """在纯文本上执行与 docx 相同的“前后行词语连续合并”。"""
         lines = text.split('\n')
+        # 围栏代码块里的行（含围栏本身）不参与合并，也不作为合并的桥梁。
+        skipped = self._md_fence_line_indices(lines, source_ext)
         entries = [
-            (*self._md_list_parts(line, source_ext), self._text_line_is_mergeable(line, source_ext))
-            for line in lines
+            (*self._md_list_parts(line, source_ext),
+             self._text_line_is_mergeable(line, source_ext) and index not in skipped)
+            for index, line in enumerate(lines)
         ]
         numbered_gaps = self._numbered_list_gap_indices(lines)
         result = []
@@ -4620,7 +4631,7 @@ class WordProcessor:
             while end + 1 < total:
                 next_prefix, next_body, next_mergeable = entries[end + 1]
                 if not next_mergeable or next_prefix:
-                    break  # 下一个列表项是独立条目，不与前一项合并
+                    break  # 下一行是独立列表项或围栏行，不与前一项合并
                 if not self._is_continuous_pair(
                     entries[end][1], next_body,
                     prev_is_list_item=bool(entries[end][0]),

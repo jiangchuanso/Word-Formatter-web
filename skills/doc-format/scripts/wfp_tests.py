@@ -42,6 +42,15 @@ class TextFileEncodingTests(unittest.TestCase):
                     "# 标题\n正文\n",
                 )
 
+    def test_read_utf8_bom_text_files_strips_bom(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sample.md"
+            path.write_bytes(b"\xef\xbb\xbf" + "# 标题\n正文\n".encode("utf-8"))
+            self.assertEqual(
+                WordProcessor._read_text_file(path),
+                "# 标题\n正文\n",
+            )
+
 
 class TextNormalizationTests(unittest.TestCase):
     def test_symbol_normalization_keeps_decimal_numbers(self):
@@ -2275,6 +2284,29 @@ class TextCleanupTests(unittest.TestCase):
         ))
         self.assertIn('中 文 不 改', content)
         self.assertIn('中文要改', content)
+
+    def test_md_fence_blocks_all_cleanup_transforms(self):
+        source = (
+            '```text\n'
+            '3. 3．保留的代码\n'
+            '发动机引气正常时从压气级第五级引出，高压九级接\n'
+            '替供气。\n'
+            '```\n\n'
+            '3. 3．正 文 要 清 洗\n'
+        )
+        content = self._run_text(source, 'input.md', self._cfg(
+            keep_source_extension=True,
+            remove_duplicate_numbering=True,
+            remove_cjk_spaces=True,
+            merge_continuous_lines=True,
+        ))
+        self.assertIn('3. 3．保留的代码', content, "围栏内的重复序号不得清理")
+        self.assertIn(
+            '发动机引气正常时从压气级第五级引出，高压九级接\n替供气。',
+            content,
+            "围栏内的断行不得合并",
+        )
+        self.assertIn('3. 正文要清洗', content)
 
 
 class DependencyCheckTests(unittest.TestCase):
